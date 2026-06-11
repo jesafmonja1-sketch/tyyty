@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -37,8 +37,8 @@ class NationalTeam(Base):
     name: Mapped[str] = mapped_column(String(120), unique=True)
     confederation: Mapped[str] = mapped_column(String(10))
     coach_id: Mapped[int | None] = mapped_column(ForeignKey("coaches.id"), nullable=True)
-    tactical_labels: Mapped[str] = mapped_column(Text, default="[]")
-    common_formations: Mapped[str] = mapped_column(Text, default="[]")
+    tactical_labels: Mapped[list[str]] = mapped_column(JSON, default=list)
+    common_formations: Mapped[list[str]] = mapped_column(JSON, default=list)
     is_supported: Mapped[bool] = mapped_column(Boolean, default=True)
 
 
@@ -50,7 +50,7 @@ class Player(Base):
     position: Mapped[str] = mapped_column(String(20))
     age: Mapped[int | None] = mapped_column(Integer, nullable=True)
     club_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
-    role_tags: Mapped[str] = mapped_column(Text, default="[]")
+    role_tags: Mapped[list[str]] = mapped_column(JSON, default=list)
 
 
 class TeamSquad(Base):
@@ -75,6 +75,9 @@ class PlayerAvailability(Base):
 
 class TeamRanking(Base):
     __tablename__ = "team_rankings"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "ranking_date", name="uq_team_rankings_team_date"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
     ranking_date: Mapped[datetime] = mapped_column(DateTime)
@@ -100,6 +103,9 @@ class Match(Base):
 
 class MatchTeamStat(Base):
     __tablename__ = "match_team_stats"
+    __table_args__ = (
+        UniqueConstraint("match_id", "national_team_id", name="uq_match_team_stats_match_team"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
@@ -147,6 +153,9 @@ class OddsQuote(Base):
 
 class TeamPowerSnapshot(Base):
     __tablename__ = "team_power_snapshots"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "captured_at", name="uq_team_power_snapshots_team_captured"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
@@ -161,6 +170,9 @@ class TeamPowerSnapshot(Base):
 
 class TeamTacticalProfile(Base):
     __tablename__ = "team_tactical_profiles"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "captured_at", name="uq_team_tactical_profiles_team_captured"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
@@ -174,6 +186,9 @@ class TeamTacticalProfile(Base):
 
 class TeamFormSnapshot(Base):
     __tablename__ = "team_form_snapshots"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "captured_at", name="uq_team_form_snapshots_team_captured"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
@@ -185,6 +200,9 @@ class TeamFormSnapshot(Base):
 
 class PlayerImpactRating(Base):
     __tablename__ = "player_impact_ratings"
+    __table_args__ = (
+        UniqueConstraint("player_id", "captured_at", name="uq_player_impact_ratings_player_captured"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     player_id: Mapped[int] = mapped_column(ForeignKey("players.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
