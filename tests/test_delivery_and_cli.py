@@ -6,7 +6,7 @@ from world_cup_intel.cli import app
 from world_cup_intel.config import EmailSettings, Settings
 from world_cup_intel.delivery.email_reports import render_match_report, send_match_report
 from world_cup_intel.delivery.scheduler import select_matches_needing_report, send_due_reports
-from world_cup_intel.schema import Match, MatchPrediction, NationalTeam, PredictionFactor, PredictionRun, SentReport
+from world_cup_intel.schema import Match, MatchPrediction, MatchReview, NationalTeam, PredictionFactor, PredictionRun, SentReport
 
 
 def _utcnow() -> datetime:
@@ -111,11 +111,28 @@ def _settings() -> Settings:
 def test_render_match_report_and_cli_preview(session, monkeypatch, tmp_path):
     kickoff = _utcnow() + timedelta(hours=2)
     match_row = _seed_prediction(session, kickoff)
+    session.add(
+        MatchReview(
+            match_id=match_row.id,
+            national_team_id=1,
+            created_at=_utcnow(),
+            summary_text="主力边锋腿筋紧张，上一场第67分钟被换下。",
+            tactical_change_summary="4-2-3-1 -> 4-3-3，边路推进更直接。",
+            strength_change_summary="整体实力较上一场提升（+2.10）。",
+            next_match_impact_summary="首发风险抬升，若边锋缺席将削弱左路爆点和反击推进。",
+        )
+    )
+    session.commit()
 
     report = render_match_report(session, match_row.id)
     assert "Brazil vs Portugal" in report.subject
     assert "under 2.5" in report.body
     assert "分析理由" in report.body
+    assert "实力差来源" in report.body
+    assert "盘口差异" in report.body
+    assert "战术变化" in report.body
+    assert "伤停影响" in report.body
+    assert "主力边锋腿筋紧张" in report.body
 
     due_matches = select_matches_needing_report(session, _utcnow(), timedelta(hours=2, minutes=5))
     assert match_row.id in [item.id for item in due_matches]
