@@ -12,8 +12,9 @@ def test_settings_from_env_reads_database_and_email_values(monkeypatch, tmp_path
 
     settings = Settings.from_env()
 
-    assert settings.database_url.endswith("world-cup.db")
+    assert settings.database_url == f"sqlite:///{db_path.as_posix()}"
     assert settings.email.smtp_host == "smtp.qq.com"
     assert settings.email.smtp_port == 465
     assert settings.email.username == "sender@qq.com"
+    assert settings.email.password == "smtp-auth-code"
     assert settings.email.recipient == "receiver@example.com"
