@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import typer
 from typer.core import TyperArgument
 
 from world_cup_intel.config import Settings
 from world_cup_intel.db import SessionLocal, build_engine, create_schema
 from world_cup_intel.delivery.email_reports import render_match_report
+from world_cup_intel.delivery.scheduler import send_due_reports
 
 
 def _patch_typer_click_compat() -> None:
@@ -53,3 +56,18 @@ def preview_report(match_id: int) -> None:
         report = render_match_report(session, match_id)
         typer.echo(report.subject)
         typer.echo(report.body)
+
+
+@app.command("send-due-reports")
+def send_due_reports_command(window_minutes: int = 125) -> None:
+    now = datetime.now(UTC).replace(tzinfo=None)
+    settings = Settings.from_env()
+    with _session() as session:
+        sent_ids = send_due_reports(
+            session,
+            settings,
+            now,
+            timedelta(minutes=window_minutes),
+        )
+        session.commit()
+        typer.echo(f"Sent {len(sent_ids)} report(s).")
