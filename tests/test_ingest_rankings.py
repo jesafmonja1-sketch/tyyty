@@ -48,3 +48,28 @@ def test_ingest_fifa_rankings_updates_existing_team_fields(session):
     assert updated_team.name == "Germany"
     assert updated_team.confederation == "UEFA"
     assert session.scalar(select(func.count()).select_from(NationalTeam)) == 1
+
+
+def test_ingest_fifa_rankings_reuses_existing_ranking_snapshot(session):
+    first_payload = {
+        "updated_at": "2026-06-11T00:00:00Z",
+        "rankings": [
+            {"rank": 3, "team_name": "Spain", "fifa_code": "ESP", "confederation": "UEFA", "points": 1810.0},
+        ],
+    }
+    second_payload = {
+        "updated_at": "2026-06-11T00:00:00Z",
+        "rankings": [
+            {"rank": 2, "team_name": "Spain", "fifa_code": "ESP", "confederation": "UEFA", "points": 1820.5},
+        ],
+    }
+
+    ingest_fifa_rankings(session, first_payload, datetime(2026, 6, 11, 9, 0, 0))
+    session.commit()
+    ingest_fifa_rankings(session, second_payload, datetime(2026, 6, 11, 10, 0, 0))
+    session.commit()
+
+    ranking = session.scalar(select(TeamRanking))
+    assert session.scalar(select(func.count()).select_from(TeamRanking)) == 1
+    assert ranking.fifa_rank == 2
+    assert ranking.ranking_points == 1820.5

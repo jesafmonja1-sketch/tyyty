@@ -35,11 +35,14 @@ def ingest_fifa_rankings(session, payload: dict, captured_at: datetime) -> None:
             team.name = row["team_name"]
             team.confederation = row["confederation"]
 
-        session.add(
-            TeamRanking(
-                national_team_id=team.id,
-                ranking_date=ranking_date,
-                fifa_rank=row["rank"],
-                ranking_points=row["points"],
+        ranking = session.scalar(
+            select(TeamRanking).where(
+                TeamRanking.national_team_id == team.id,
+                TeamRanking.ranking_date == ranking_date,
             )
         )
+        if ranking is None:
+            ranking = TeamRanking(national_team_id=team.id, ranking_date=ranking_date)
+            session.add(ranking)
+        ranking.fifa_rank = row["rank"]
+        ranking.ranking_points = row["points"]
