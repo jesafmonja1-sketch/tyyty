@@ -22,3 +22,29 @@ def test_ingest_fifa_rankings_records_raw_payload_and_ranking_rows(session):
     assert session.scalar(select(func.count()).select_from(RawPayload)) == 1
     assert session.scalar(select(func.count()).select_from(NationalTeam)) == 2
     assert session.scalar(select(func.count()).select_from(TeamRanking)) == 2
+
+
+def test_ingest_fifa_rankings_updates_existing_team_fields(session):
+    team = NationalTeam(
+        fifa_code="GER",
+        name="Old Germany",
+        confederation="OLD",
+        tactical_labels=[],
+        common_formations=[],
+    )
+    session.add(team)
+    session.commit()
+    payload = {
+        "updated_at": "2026-06-11T00:00:00Z",
+        "rankings": [
+            {"rank": 8, "team_name": "Germany", "fifa_code": "GER", "confederation": "UEFA", "points": 1700.1},
+        ],
+    }
+
+    ingest_fifa_rankings(session, payload, datetime(2026, 6, 11, 9, 0, 0))
+    session.commit()
+
+    updated_team = session.scalar(select(NationalTeam).where(NationalTeam.fifa_code == "GER"))
+    assert updated_team.name == "Germany"
+    assert updated_team.confederation == "UEFA"
+    assert session.scalar(select(func.count()).select_from(NationalTeam)) == 1

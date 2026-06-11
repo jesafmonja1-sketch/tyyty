@@ -31,6 +31,9 @@ def ingest_fifa_rankings(session, payload: dict, captured_at: datetime) -> None:
             )
             session.add(team)
             session.flush()
+        else:
+            team.name = row["team_name"]
+            team.confederation = row["confederation"]
 
         session.add(
             TeamRanking(
