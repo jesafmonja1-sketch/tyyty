@@ -85,6 +85,19 @@ class TeamRanking(Base):
     ranking_points: Mapped[float] = mapped_column(Float)
 
 
+class Venue(Base):
+    __tablename__ = "venues"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    name: Mapped[str] = mapped_column(String(120), unique=True)
+    city: Mapped[str] = mapped_column(String(80))
+    country: Mapped[str] = mapped_column(String(80))
+    altitude_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pitch_surface: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    pitch_length_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pitch_width_meters: Mapped[float | None] = mapped_column(Float, nullable=True)
+    climate_tag: Mapped[str | None] = mapped_column(String(40), nullable=True)
+
+
 class Match(Base):
     __tablename__ = "matches"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -92,8 +105,11 @@ class Match(Base):
     competition: Mapped[str] = mapped_column(String(120))
     stage: Mapped[str] = mapped_column(String(60))
     kickoff_at: Mapped[datetime] = mapped_column(DateTime)
-    home_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
-    away_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
+    home_team_id: Mapped[int | None] = mapped_column(ForeignKey("national_teams.id"), nullable=True)
+    away_team_id: Mapped[int | None] = mapped_column(ForeignKey("national_teams.id"), nullable=True)
+    venue_id: Mapped[int | None] = mapped_column(ForeignKey("venues.id"), nullable=True)
+    home_slot_label: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    away_slot_label: Mapped[str | None] = mapped_column(String(40), nullable=True)
     is_neutral_site: Mapped[bool] = mapped_column(Boolean, default=True)
     home_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     away_score: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -151,6 +167,57 @@ class OddsQuote(Base):
     under_price: Mapped[float | None] = mapped_column(Float, nullable=True)
 
 
+class MatchWeatherSnapshot(Base):
+    __tablename__ = "match_weather_snapshots"
+    __table_args__ = (
+        UniqueConstraint("match_id", "captured_at", "source_name", name="uq_match_weather_match_captured_source"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    source_name: Mapped[str] = mapped_column(String(80))
+    temperature_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    humidity_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    wind_speed_kph: Mapped[float | None] = mapped_column(Float, nullable=True)
+    precipitation_mm: Mapped[float | None] = mapped_column(Float, nullable=True)
+    apparent_temperature_c: Mapped[float | None] = mapped_column(Float, nullable=True)
+    weather_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class MatchRefereeSnapshot(Base):
+    __tablename__ = "match_referee_snapshots"
+    __table_args__ = (
+        UniqueConstraint("match_id", "captured_at", "source_name", name="uq_match_referee_match_captured_source"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    source_name: Mapped[str] = mapped_column(String(80))
+    referee_name: Mapped[str] = mapped_column(String(120))
+    nationality: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    average_yellow_cards: Mapped[float | None] = mapped_column(Float, nullable=True)
+    penalty_tendency_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    foul_strictness_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    var_intervention_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    pace_disruption_score: Mapped[float | None] = mapped_column(Float, nullable=True)
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
+class MatchContextSnapshot(Base):
+    __tablename__ = "match_context_snapshots"
+    __table_args__ = (
+        UniqueConstraint("match_id", "captured_at", "source_name", name="uq_match_context_match_captured_source"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    source_name: Mapped[str] = mapped_column(String(80))
+    advanced_metrics: Mapped[dict] = mapped_column(JSON, default=dict)
+    schedule_fatigue: Mapped[dict] = mapped_column(JSON, default=dict)
+    motivation: Mapped[dict] = mapped_column(JSON, default=dict)
+    scenario_projection: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
 class TeamPowerSnapshot(Base):
     __tablename__ = "team_power_snapshots"
     __table_args__ = (
@@ -198,6 +265,23 @@ class TeamFormSnapshot(Base):
     conceding_trend: Mapped[float] = mapped_column(Float)
 
 
+class TeamEnvironmentProfile(Base):
+    __tablename__ = "team_environment_profiles"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "captured_at", name="uq_team_environment_profiles_team_captured"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    heat_adaptation_score: Mapped[float] = mapped_column(Float)
+    altitude_adaptation_score: Mapped[float] = mapped_column(Float)
+    humidity_adaptation_score: Mapped[float] = mapped_column(Float)
+    travel_recovery_score: Mapped[float] = mapped_column(Float)
+    fast_start_score: Mapped[float] = mapped_column(Float)
+    training_intensity_preference: Mapped[str] = mapped_column(String(20))
+    notes: Mapped[str] = mapped_column(Text, default="")
+
+
 class PlayerImpactRating(Base):
     __tablename__ = "player_impact_ratings"
     __table_args__ = (
@@ -225,7 +309,12 @@ class MatchPrediction(Base):
     home_win_probability: Mapped[float] = mapped_column(Float)
     draw_probability: Mapped[float] = mapped_column(Float)
     away_win_probability: Mapped[float] = mapped_column(Float)
+    expected_home_goals: Mapped[float] = mapped_column(Float, default=0.0)
+    expected_away_goals: Mapped[float] = mapped_column(Float, default=0.0)
+    over_2_5_probability: Mapped[float] = mapped_column(Float, default=0.0)
+    under_2_5_probability: Mapped[float] = mapped_column(Float, default=0.0)
     fair_handicap_line: Mapped[float] = mapped_column(Float)
+    fair_total_line: Mapped[float] = mapped_column(Float, default=2.5)
     market_handicap_line: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_handicap_side: Mapped[str] = mapped_column(String(40))
     totals_tendency: Mapped[str] = mapped_column(String(40))
@@ -253,6 +342,35 @@ class MatchReview(Base):
     tactical_change_summary: Mapped[str] = mapped_column(Text)
     strength_change_summary: Mapped[str] = mapped_column(Text)
     next_match_impact_summary: Mapped[str] = mapped_column(Text)
+
+
+class TeamLearningSnapshot(Base):
+    __tablename__ = "team_learning_snapshots"
+    __table_args__ = (
+        UniqueConstraint("national_team_id", "match_id", name="uq_team_learning_snapshots_team_match"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    readiness_score: Mapped[float] = mapped_column(Float)
+    momentum_score: Mapped[float] = mapped_column(Float)
+    availability_alert_count: Mapped[int] = mapped_column(Integer)
+    tactical_continuity_score: Mapped[float] = mapped_column(Float)
+    learning_summary: Mapped[str] = mapped_column(Text)
+    next_match_focus: Mapped[str] = mapped_column(Text)
+
+
+class PostMatchRefreshRun(Base):
+    __tablename__ = "post_match_refresh_runs"
+    __table_args__ = (
+        UniqueConstraint("match_id", name="uq_post_match_refresh_runs_match"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    processed_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(30))
+    notes: Mapped[str] = mapped_column(Text, default="")
 
 
 class TeamChangeLog(Base):
