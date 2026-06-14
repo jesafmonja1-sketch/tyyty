@@ -233,16 +233,27 @@ def test_generate_match_prediction_totals_probabilities_prefers_lower_total_in_c
 
 
 def test_generate_match_prediction_math_engine_prefers_open_scores_with_goal_pressure(session):
-    match_row = _build_math_engine_match(
+    baseline_match = _build_math_engine_match(
         session,
-        external_id="wc-math-goal-pressure",
+        external_id="wc-math-goal-pressure-baseline",
+        home_code="GPB",
+        away_code="GPC",
+        kickoff_at=datetime(2026, 7, 7, 18, 0, 0),
+        home_attack=72.0,
+        home_defense=72.0,
+        away_attack=72.0,
+        away_defense=72.0,
+    )
+    pressured_match = _build_math_engine_match(
+        session,
+        external_id="wc-math-goal-pressure-live",
         home_code="GPH",
         away_code="GPA",
-        kickoff_at=datetime(2026, 7, 7, 18, 0, 0),
-        home_attack=86.0,
-        home_defense=62.0,
-        away_attack=83.0,
-        away_defense=61.0,
+        kickoff_at=datetime(2026, 7, 7, 21, 0, 0),
+        home_attack=72.0,
+        home_defense=72.0,
+        away_attack=72.0,
+        away_defense=72.0,
         motivation={
             "group_matchday": 3,
             "home_need": "must win",
@@ -252,7 +263,16 @@ def test_generate_match_prediction_math_engine_prefers_open_scores_with_goal_pre
         },
     )
 
-    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 7, 13, 0, 0))
+    baseline_prediction = generate_match_prediction(
+        session,
+        baseline_match.id,
+        datetime(2026, 7, 7, 13, 0, 0),
+    )
+    pressured_prediction = generate_match_prediction(
+        session,
+        pressured_match.id,
+        datetime(2026, 7, 7, 13, 30, 0),
+    )
 
-    assert prediction.over_2_5_probability > 0.5
-    assert any(score in prediction.likely_scorelines for score in ("2-1", "3-1", "2-2"))
+    assert pressured_prediction.over_2_5_probability > baseline_prediction.over_2_5_probability
+    assert any(score in pressured_prediction.likely_scorelines for score in ("2-1", "3-1", "2-2"))
