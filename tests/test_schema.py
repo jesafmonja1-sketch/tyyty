@@ -59,14 +59,28 @@ def test_matches_table_includes_slot_label_columns(tmp_path):
     assert {"home_slot_label", "away_slot_label"}.issubset(columns)
 
 
-def test_match_prediction_schema_includes_math_engine_fields():
-    columns = MatchPrediction.__table__.columns.keys()
+def test_match_prediction_schema_includes_math_engine_fields(tmp_path):
+    orm_columns = MatchPrediction.__table__.columns.keys()
 
-    assert "expected_home_goals" in columns
-    assert "expected_away_goals" in columns
-    assert "over_2_5_probability" in columns
-    assert "under_2_5_probability" in columns
-    assert "fair_total_line" in columns
+    assert "expected_home_goals" in orm_columns
+    assert "expected_away_goals" in orm_columns
+    assert "over_2_5_probability" in orm_columns
+    assert "under_2_5_probability" in orm_columns
+    assert "fair_total_line" in orm_columns
+
+    db_url = f"sqlite:///{(tmp_path / 'schema.db').as_posix()}"
+    engine = build_engine(db_url)
+
+    create_schema(engine)
+
+    db_columns = {column["name"] for column in inspect(engine).get_columns("match_predictions")}
+    assert {
+        "expected_home_goals",
+        "expected_away_goals",
+        "over_2_5_probability",
+        "under_2_5_probability",
+        "fair_total_line",
+    }.issubset(db_columns)
 
 
 def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tmp_path):
