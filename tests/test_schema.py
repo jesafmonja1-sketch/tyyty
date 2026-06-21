@@ -5,7 +5,14 @@ from sqlalchemy import inspect, text
 from sqlalchemy.exc import IntegrityError
 
 from world_cup_intel.db import build_engine, create_schema
-from world_cup_intel.schema import MatchPrediction, NationalTeam, Player, TeamRanking
+from world_cup_intel.schema import (
+    MatchPrediction,
+    MarketCalibrationProfile,
+    NationalTeam,
+    Player,
+    TeamRanking,
+    _upgrade_existing_sqlite_matches_table,
+)
 
 
 def test_create_schema_builds_core_tables(tmp_path):
@@ -83,6 +90,82 @@ def test_match_prediction_schema_includes_math_engine_fields(tmp_path):
     }.issubset(db_columns)
 
 
+def test_create_schema_builds_market_calibration_profiles_table(tmp_path):
+    db_url = f"sqlite:///{(tmp_path / 'schema.db').as_posix()}"
+    engine = build_engine(db_url)
+
+    create_schema(engine)
+
+    tables = set(inspect(engine).get_table_names())
+    assert "market_calibration_profiles" in tables
+
+    columns = {column["name"] for column in inspect(engine).get_columns("market_calibration_profiles")}
+    assert {
+        "market_family",
+        "bucket_key",
+        "profile_version",
+        "sample_count",
+        "fallback_bucket_key",
+        "profile_json",
+        "updated_at",
+    }.issubset(columns)
+
+
+def test_market_calibration_profiles_are_unique_by_family_bucket_and_version(session):
+    profile = dict(
+        market_family="1x2",
+        bucket_key="uefa-balanced",
+        profile_version="v1",
+        sample_count=128,
+        fallback_bucket_key="default",
+        profile_json={"bins": [0.1, 0.2, 0.3]},
+        updated_at=datetime(2026, 6, 21, 12, 0, 0),
+    )
+    session.add(MarketCalibrationProfile(**profile))
+    session.add(MarketCalibrationProfile(**profile))
+
+    with pytest.raises(IntegrityError):
+        session.commit()
+
+
+def test_match_prediction_schema_includes_calibrated_output_fields(tmp_path):
+    orm_columns = MatchPrediction.__table__.columns.keys()
+
+    assert {
+        "calibrated_home_win_probability",
+        "calibrated_draw_probability",
+        "calibrated_away_win_probability",
+        "handicap_cover_probability",
+        "handicap_push_probability",
+        "handicap_fail_probability",
+        "totals_over_probability",
+        "totals_push_probability",
+        "totals_under_probability",
+        "recommended_totals_side",
+        "calibration_summary_json",
+    }.issubset(orm_columns)
+
+    db_url = f"sqlite:///{(tmp_path / 'schema.db').as_posix()}"
+    engine = build_engine(db_url)
+
+    create_schema(engine)
+
+    db_columns = {column["name"] for column in inspect(engine).get_columns("match_predictions")}
+    assert {
+        "calibrated_home_win_probability",
+        "calibrated_draw_probability",
+        "calibrated_away_win_probability",
+        "handicap_cover_probability",
+        "handicap_push_probability",
+        "handicap_fail_probability",
+        "totals_over_probability",
+        "totals_push_probability",
+        "totals_under_probability",
+        "recommended_totals_side",
+        "calibration_summary_json",
+    }.issubset(db_columns)
+
+
 def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tmp_path):
     db_url = f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}"
     engine = build_engine(db_url)
@@ -126,6 +209,64 @@ def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tm
                 """
             )
         )
+        connection.execute(
+            text(
+                """
+                INSERT INTO national_teams (
+                    id,
+                    fifa_code,
+                    name,
+                    confederation,
+                    coach_id,
+                    tactical_labels,
+                    common_formations,
+                    is_supported
+                ) VALUES (
+                    1,
+                    'BRA',
+                    'Brazil',
+                    'CONMEBOL',
+                    NULL,
+                    '[]',
+                    '[]',
+                    1
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO matches (
+                    id,
+                    external_id,
+                    competition,
+                    stage,
+                    kickoff_at,
+                    home_team_id,
+                    away_team_id,
+                    is_neutral_site,
+                    home_score,
+                    away_score,
+                    half_time_score,
+                    status
+                ) VALUES (
+                    10,
+                    'legacy-existing-match',
+                    'FIFA World Cup',
+                    'Group Stage',
+                    '2026-06-18 18:00:00',
+                    1,
+                    1,
+                    1,
+                    0,
+                    0,
+                    '0-0',
+                    'finished'
+                )
+                """
+            )
+        )
 
     create_schema(engine)
 
@@ -133,6 +274,26 @@ def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tm
     assert {"home_slot_label", "away_slot_label"}.issubset(columns)
     assert columns["home_team_id"]["nullable"] is True
     assert columns["away_team_id"]["nullable"] is True
+
+    with engine.begin() as connection:
+        persisted_match = connection.execute(
+            text(
+                """
+                SELECT external_id, home_team_id, away_team_id, home_score, away_score, half_time_score, status
+                FROM matches
+                WHERE id = 10
+                """
+            )
+        ).one()
+    assert persisted_match == (
+        "legacy-existing-match",
+        1,
+        1,
+        0,
+        0,
+        "0-0",
+        "finished",
+    )
 
     with engine.begin() as connection:
         connection.execute(
@@ -164,6 +325,19 @@ def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tm
                 """
             )
         )
+
+
+def test_match_upgrade_hook_skips_non_sqlite_connections():
+    class _FakeDialect:
+        name = "postgresql"
+
+    class _FakeConnection:
+        dialect = _FakeDialect()
+
+        def execute(self, statement):
+            raise AssertionError(f"should not execute on non-sqlite: {statement}")
+
+    _upgrade_existing_sqlite_matches_table(None, _FakeConnection())
 
 
 def test_sqlite_foreign_keys_are_enforced(tmp_path):

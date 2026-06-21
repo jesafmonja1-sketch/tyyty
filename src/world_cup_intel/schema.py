@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -319,6 +319,26 @@ class PredictionRun(Base):
     model_version: Mapped[str] = mapped_column(String(40))
 
 
+class MarketCalibrationProfile(Base):
+    __tablename__ = "market_calibration_profiles"
+    __table_args__ = (
+        UniqueConstraint(
+            "market_family",
+            "bucket_key",
+            "profile_version",
+            name="uq_market_calibration_profiles_family_bucket_version",
+        ),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    market_family: Mapped[str] = mapped_column(String(40))
+    bucket_key: Mapped[str] = mapped_column(String(120))
+    profile_version: Mapped[str] = mapped_column(String(40))
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    fallback_bucket_key: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime)
+
+
 class MatchFeatureSnapshot(Base):
     __tablename__ = "match_feature_snapshots"
     __table_args__ = (
@@ -384,18 +404,29 @@ class MatchPrediction(Base):
     home_win_probability: Mapped[float] = mapped_column(Float)
     draw_probability: Mapped[float] = mapped_column(Float)
     away_win_probability: Mapped[float] = mapped_column(Float)
+    calibrated_home_win_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_draw_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    calibrated_away_win_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
     expected_home_goals: Mapped[float] = mapped_column(Float, default=0.0)
     expected_away_goals: Mapped[float] = mapped_column(Float, default=0.0)
     over_2_5_probability: Mapped[float] = mapped_column(Float, default=0.0)
     under_2_5_probability: Mapped[float] = mapped_column(Float, default=0.0)
+    handicap_cover_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    handicap_push_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    handicap_fail_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    totals_over_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    totals_push_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    totals_under_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
     fair_handicap_line: Mapped[float] = mapped_column(Float)
     fair_total_line: Mapped[float] = mapped_column(Float, default=2.5)
     market_handicap_line: Mapped[float | None] = mapped_column(Float, nullable=True)
     recommended_handicap_side: Mapped[str] = mapped_column(String(40))
+    recommended_totals_side: Mapped[str | None] = mapped_column(String(40), nullable=True)
     totals_tendency: Mapped[str] = mapped_column(String(40))
     likely_scorelines: Mapped[str] = mapped_column(Text)
     confidence_level: Mapped[str] = mapped_column(String(20))
     summary_conclusion: Mapped[str] = mapped_column(Text)
+    calibration_summary_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class PredictionFactor(Base):
@@ -477,3 +508,94 @@ class SentReport(Base):
     recipient: Mapped[str] = mapped_column(String(120))
     subject: Mapped[str] = mapped_column(String(255))
     body_text: Mapped[str] = mapped_column(Text)
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _upgrade_existing_sqlite_matches_table(target, connection, **kwargs) -> None:
+    if connection.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(connection)
+    if "matches" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"]: column for column in inspector.get_columns("matches")}
+    needs_slot_columns = "home_slot_label" not in columns or "away_slot_label" not in columns
+    needs_nullable_team_ids = not columns["home_team_id"]["nullable"] or not columns["away_team_id"]["nullable"]
+
+    if not needs_slot_columns and not needs_nullable_team_ids:
+        return
+
+    if not needs_nullable_team_ids:
+        if "home_slot_label" not in columns:
+            connection.execute(text("ALTER TABLE matches ADD COLUMN home_slot_label VARCHAR(40)"))
+        if "away_slot_label" not in columns:
+            connection.execute(text("ALTER TABLE matches ADD COLUMN away_slot_label VARCHAR(40)"))
+        return
+
+    connection.execute(text("PRAGMA foreign_keys=OFF"))
+    try:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE matches__schema_upgrade (
+                    id INTEGER PRIMARY KEY,
+                    external_id VARCHAR(80) UNIQUE NOT NULL,
+                    competition VARCHAR(120) NOT NULL,
+                    stage VARCHAR(60) NOT NULL,
+                    kickoff_at DATETIME NOT NULL,
+                    home_team_id INTEGER,
+                    away_team_id INTEGER,
+                    venue_id INTEGER,
+                    home_slot_label VARCHAR(40),
+                    away_slot_label VARCHAR(40),
+                    is_neutral_site BOOLEAN NOT NULL,
+                    home_score INTEGER,
+                    away_score INTEGER,
+                    half_time_score VARCHAR(20),
+                    status VARCHAR(30) NOT NULL,
+                    FOREIGN KEY(home_team_id) REFERENCES national_teams (id),
+                    FOREIGN KEY(away_team_id) REFERENCES national_teams (id),
+                    FOREIGN KEY(venue_id) REFERENCES venues (id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO matches__schema_upgrade (
+                    id,
+                    external_id,
+                    competition,
+                    stage,
+                    kickoff_at,
+                    home_team_id,
+                    away_team_id,
+                    is_neutral_site,
+                    home_score,
+                    away_score,
+                    half_time_score,
+                    status
+                )
+                SELECT
+                    id,
+                    external_id,
+                    competition,
+                    stage,
+                    kickoff_at,
+                    home_team_id,
+                    away_team_id,
+                    is_neutral_site,
+                    home_score,
+                    away_score,
+                    half_time_score,
+                    status
+                FROM matches
+                """
+            )
+        )
+        connection.execute(text("DROP TABLE matches"))
+        connection.execute(text("ALTER TABLE matches__schema_upgrade RENAME TO matches"))
+    finally:
+        connection.execute(text("PRAGMA foreign_keys=ON"))
