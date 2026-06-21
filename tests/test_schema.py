@@ -166,6 +166,167 @@ def test_match_prediction_schema_includes_calibrated_output_fields(tmp_path):
     }.issubset(db_columns)
 
 
+def test_create_schema_upgrades_legacy_match_predictions_table(tmp_path):
+    db_url = f"sqlite:///{(tmp_path / 'legacy-match-predictions.db').as_posix()}"
+    engine = build_engine(db_url)
+
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                CREATE TABLE prediction_runs (
+                    id INTEGER PRIMARY KEY,
+                    match_id INTEGER NOT NULL,
+                    captured_at DATETIME NOT NULL,
+                    model_version VARCHAR(40) NOT NULL
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                CREATE TABLE match_predictions (
+                    id INTEGER PRIMARY KEY,
+                    prediction_run_id INTEGER NOT NULL,
+                    home_win_probability FLOAT NOT NULL,
+                    draw_probability FLOAT NOT NULL,
+                    away_win_probability FLOAT NOT NULL,
+                    fair_handicap_line FLOAT NOT NULL,
+                    market_handicap_line FLOAT,
+                    recommended_handicap_side VARCHAR(40) NOT NULL,
+                    totals_tendency VARCHAR(40) NOT NULL,
+                    likely_scorelines TEXT NOT NULL,
+                    confidence_level VARCHAR(20) NOT NULL,
+                    summary_conclusion TEXT NOT NULL,
+                    expected_home_goals FLOAT NOT NULL DEFAULT 0.0,
+                    expected_away_goals FLOAT NOT NULL DEFAULT 0.0,
+                    over_2_5_probability FLOAT NOT NULL DEFAULT 0.0,
+                    under_2_5_probability FLOAT NOT NULL DEFAULT 0.0,
+                    fair_total_line FLOAT NOT NULL DEFAULT 2.5,
+                    FOREIGN KEY(prediction_run_id) REFERENCES prediction_runs (id)
+                )
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO prediction_runs (id, match_id, captured_at, model_version)
+                VALUES (1, 49, '2026-06-21 20:00:00', 'v1-rules')
+                """
+            )
+        )
+        connection.execute(
+            text(
+                """
+                INSERT INTO match_predictions (
+                    id,
+                    prediction_run_id,
+                    home_win_probability,
+                    draw_probability,
+                    away_win_probability,
+                    fair_handicap_line,
+                    market_handicap_line,
+                    recommended_handicap_side,
+                    totals_tendency,
+                    likely_scorelines,
+                    confidence_level,
+                    summary_conclusion,
+                    expected_home_goals,
+                    expected_away_goals,
+                    over_2_5_probability,
+                    under_2_5_probability,
+                    fair_total_line
+                ) VALUES (
+                    1,
+                    1,
+                    0.50,
+                    0.25,
+                    0.25,
+                    -0.5,
+                    -0.5,
+                    'home',
+                    'under 2.5',
+                    '1-0,2-0,1-1',
+                    'medium',
+                    'legacy row',
+                    1.40,
+                    0.80,
+                    0.45,
+                    0.55,
+                    2.25
+                )
+                """
+            )
+        )
+
+    create_schema(engine)
+
+    columns = {column["name"] for column in inspect(engine).get_columns("match_predictions")}
+    assert {
+        "calibrated_home_win_probability",
+        "calibrated_draw_probability",
+        "calibrated_away_win_probability",
+        "handicap_cover_probability",
+        "handicap_push_probability",
+        "handicap_fail_probability",
+        "totals_over_probability",
+        "totals_push_probability",
+        "totals_under_probability",
+        "recommended_totals_side",
+        "calibration_summary_json",
+    }.issubset(columns)
+
+    with engine.begin() as connection:
+        persisted_row = connection.execute(
+            text(
+                """
+                SELECT
+                    id,
+                    prediction_run_id,
+                    home_win_probability,
+                    draw_probability,
+                    away_win_probability,
+                    fair_handicap_line,
+                    market_handicap_line,
+                    recommended_handicap_side,
+                    totals_tendency,
+                    likely_scorelines,
+                    confidence_level,
+                    summary_conclusion,
+                    expected_home_goals,
+                    expected_away_goals,
+                    over_2_5_probability,
+                    under_2_5_probability,
+                    fair_total_line
+                FROM match_predictions
+                WHERE id = 1
+                """
+            )
+        ).one()
+
+    assert persisted_row == (
+        1,
+        1,
+        0.50,
+        0.25,
+        0.25,
+        -0.5,
+        -0.5,
+        "home",
+        "under 2.5",
+        "1-0,2-0,1-1",
+        "medium",
+        "legacy row",
+        1.40,
+        0.80,
+        0.45,
+        0.55,
+        2.25,
+    )
+
+
 def test_create_schema_upgrades_legacy_matches_table_for_placeholder_fixtures(tmp_path):
     db_url = f"sqlite:///{(tmp_path / 'legacy.db').as_posix()}"
     engine = build_engine(db_url)

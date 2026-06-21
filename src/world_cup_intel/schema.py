@@ -599,3 +599,35 @@ def _upgrade_existing_sqlite_matches_table(target, connection, **kwargs) -> None
         connection.execute(text("ALTER TABLE matches__schema_upgrade RENAME TO matches"))
     finally:
         connection.execute(text("PRAGMA foreign_keys=ON"))
+
+
+@event.listens_for(Base.metadata, "after_create")
+def _upgrade_existing_sqlite_match_predictions_table(target, connection, **kwargs) -> None:
+    if connection.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(connection)
+    if "match_predictions" not in inspector.get_table_names():
+        return
+
+    columns = {column["name"]: column for column in inspector.get_columns("match_predictions")}
+    missing_columns = [
+        ("calibrated_home_win_probability", "FLOAT"),
+        ("calibrated_draw_probability", "FLOAT"),
+        ("calibrated_away_win_probability", "FLOAT"),
+        ("handicap_cover_probability", "FLOAT"),
+        ("handicap_push_probability", "FLOAT"),
+        ("handicap_fail_probability", "FLOAT"),
+        ("totals_over_probability", "FLOAT"),
+        ("totals_push_probability", "FLOAT"),
+        ("totals_under_probability", "FLOAT"),
+        ("recommended_totals_side", "VARCHAR(40)"),
+        ("calibration_summary_json", "JSON NOT NULL DEFAULT '{}'"),
+    ]
+
+    for column_name, column_type in missing_columns:
+        if column_name in columns:
+            continue
+        connection.execute(
+            text(f"ALTER TABLE match_predictions ADD COLUMN {column_name} {column_type}")
+        )
