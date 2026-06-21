@@ -712,6 +712,190 @@ def test_cli_analyze_match_uses_fair_total_line_when_market_total_missing(monkey
     assert "防冷比分: N/A" in result.stdout
 
 
+def test_cli_list_matches_prints_recent_matches(monkeypatch, tmp_path):
+    db_path = tmp_path / "list-matches.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.delenv("WCI_EMAIL_SMTP_HOST", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_SMTP_PORT", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_RECIPIENT", raising=False)
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        home_one = NationalTeam(
+            fifa_code="BRA",
+            name="Brazil",
+            confederation="CONMEBOL",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away_one = NationalTeam(
+            fifa_code="POR",
+            name="Portugal",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        home_two = NationalTeam(
+            fifa_code="GER",
+            name="Germany",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away_two = NationalTeam(
+            fifa_code="JPN",
+            name="Japan",
+            confederation="AFC",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        db_session.add_all([home_one, away_one, home_two, away_two])
+        db_session.flush()
+        db_session.add_all(
+            [
+                Match(
+                    external_id="wc-list-1",
+                    competition="FIFA World Cup",
+                    stage="Group Stage",
+                    kickoff_at=_utcnow() + timedelta(hours=2),
+                    home_team_id=home_one.id,
+                    away_team_id=away_one.id,
+                    is_neutral_site=True,
+                    home_score=None,
+                    away_score=None,
+                    half_time_score=None,
+                    status="scheduled",
+                ),
+                Match(
+                    external_id="wc-list-2",
+                    competition="FIFA World Cup",
+                    stage="Group Stage",
+                    kickoff_at=_utcnow() + timedelta(hours=4),
+                    home_team_id=home_two.id,
+                    away_team_id=away_two.id,
+                    is_neutral_site=True,
+                    home_score=None,
+                    away_score=None,
+                    half_time_score=None,
+                    status="scheduled",
+                ),
+            ]
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["list-matches", "--limit", "2"])
+
+    assert result.exit_code == 0
+    assert "Germany vs Japan" in result.stdout
+    assert "Brazil vs Portugal" in result.stdout
+    assert "Group Stage" in result.stdout
+    assert "scheduled" in result.stdout
+
+
+def test_cli_find_match_filters_by_team_name(monkeypatch, tmp_path):
+    db_path = tmp_path / "find-match.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.delenv("WCI_EMAIL_SMTP_HOST", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_SMTP_PORT", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_RECIPIENT", raising=False)
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        home_one = NationalTeam(
+            fifa_code="NED",
+            name="Netherlands",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away_one = NationalTeam(
+            fifa_code="SWE",
+            name="Sweden",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        home_two = NationalTeam(
+            fifa_code="USA",
+            name="United States",
+            confederation="CONCACAF",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away_two = NationalTeam(
+            fifa_code="AUS",
+            name="Australia",
+            confederation="AFC",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        db_session.add_all([home_one, away_one, home_two, away_two])
+        db_session.flush()
+        db_session.add_all(
+            [
+                Match(
+                    external_id="wc-find-1",
+                    competition="FIFA World Cup",
+                    stage="Group Stage",
+                    kickoff_at=_utcnow() + timedelta(hours=6),
+                    home_team_id=home_one.id,
+                    away_team_id=away_one.id,
+                    is_neutral_site=True,
+                    home_score=None,
+                    away_score=None,
+                    half_time_score=None,
+                    status="scheduled",
+                ),
+                Match(
+                    external_id="wc-find-2",
+                    competition="FIFA World Cup",
+                    stage="Group Stage",
+                    kickoff_at=_utcnow() + timedelta(hours=8),
+                    home_team_id=home_two.id,
+                    away_team_id=away_two.id,
+                    is_neutral_site=True,
+                    home_score=None,
+                    away_score=None,
+                    half_time_score=None,
+                    status="scheduled",
+                ),
+            ]
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["find-match", "--team", "nether", "--limit", "5"])
+
+    assert result.exit_code == 0
+    assert "Netherlands vs Sweden" in result.stdout
+    assert "United States vs Australia" not in result.stdout
+
+
 def test_rebuild_market_calibration_command_runs_successfully(monkeypatch, tmp_path):
     db_path = tmp_path / "rebuild-market-calibration.db"
     monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")

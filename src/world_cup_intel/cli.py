@@ -21,7 +21,8 @@ from world_cup_intel.schema import Match
 from world_cup_intel.schema import MatchPrediction
 from world_cup_intel.schema import PredictionRun
 from world_cup_intel.schema import NationalTeam
-from sqlalchemy import desc, select
+from sqlalchemy import desc, or_, select
+from sqlalchemy.orm import aliased
 
 
 def _patch_typer_click_compat() -> None:
@@ -106,6 +107,55 @@ def _latest_prediction_for_match(session, match_id: int) -> tuple[Match, MatchPr
     return match_row, prediction
 
 
+def _render_match_rows(rows: list[tuple[Match, NationalTeam, NationalTeam]]) -> str:
+    if not rows:
+        return "No matches found."
+
+    rendered_rows = []
+    for match_row, home_team, away_team in rows:
+        kickoff = match_row.kickoff_at.isoformat(sep=" ", timespec="minutes")
+        rendered_rows.append(
+            f"{match_row.id} | {home_team.name} vs {away_team.name} | "
+            f"{kickoff} | {match_row.stage} | {match_row.status}"
+        )
+    return "\n".join(rendered_rows)
+
+
+def _parse_cli_option(
+    args: list[str],
+    option_name: str,
+    *,
+    default=None,
+    required: bool = False,
+    cast=str,
+):
+    if option_name not in args:
+        if required:
+            raise typer.BadParameter(f"{option_name} requires a value")
+        return default
+
+    option_index = args.index(option_name)
+    try:
+        option_value = args[option_index + 1]
+    except IndexError as exc:
+        raise typer.BadParameter(f"{option_name} requires a value") from exc
+
+    if option_value.startswith("--"):
+        raise typer.BadParameter(f"{option_name} requires a value")
+    return cast(option_value)
+
+
+def _match_listing_query():
+    home_team = aliased(NationalTeam)
+    away_team = aliased(NationalTeam)
+    query = (
+        select(Match, home_team, away_team)
+        .join(home_team, home_team.id == Match.home_team_id)
+        .join(away_team, away_team.id == Match.away_team_id)
+    )
+    return query, home_team, away_team
+
+
 @app.command("preview-report")
 def preview_report(match_id: int) -> None:
     with _session() as session:
@@ -129,6 +179,44 @@ def analyze_match(match_id: int) -> None:
             diagnostic=diagnostic,
         )
         typer.echo(render_cli_match_analysis(payload))
+
+
+@app.command(
+    "list-matches",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def list_matches(ctx: typer.Context) -> None:
+    limit = _parse_cli_option(ctx.args, "--limit", default=20, cast=int)
+    with _session() as session:
+        query, _, _ = _match_listing_query()
+        rows = session.execute(
+            query.order_by(desc(Match.kickoff_at), desc(Match.id)).limit(limit)
+        ).all()
+        typer.echo(_render_match_rows(rows))
+
+
+@app.command(
+    "find-match",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
+)
+def find_match(ctx: typer.Context) -> None:
+    team = _parse_cli_option(ctx.args, "--team", required=True)
+    limit = _parse_cli_option(ctx.args, "--limit", default=20, cast=int)
+    with _session() as session:
+        team_pattern = f"%{team}%"
+        query, home_team, away_team = _match_listing_query()
+        rows = session.execute(
+            query
+            .where(
+                or_(
+                    home_team.name.ilike(team_pattern),
+                    away_team.name.ilike(team_pattern),
+                )
+            )
+            .order_by(desc(Match.kickoff_at), desc(Match.id))
+            .limit(limit)
+        ).all()
+        typer.echo(_render_match_rows(rows))
 
 
 @app.command("send-due-reports")
