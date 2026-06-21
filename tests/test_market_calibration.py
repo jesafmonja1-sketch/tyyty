@@ -1,3 +1,7 @@
+from datetime import datetime
+
+import pytest
+
 from world_cup_intel.analysis.market_calibration import build_handicap_bucket_key
 from world_cup_intel.analysis.market_calibration import build_handicap_profile
 from world_cup_intel.analysis.market_calibration import build_one_x_two_profile
@@ -5,8 +9,12 @@ from world_cup_intel.analysis.market_calibration import build_probability_band_k
 from world_cup_intel.analysis.market_calibration import build_totals_profile
 from world_cup_intel.analysis.market_calibration import build_totals_bucket_key
 from world_cup_intel.analysis.market_calibration import choose_profile_with_fallback
+from world_cup_intel.analysis.market_calibration import compute_brier_score
+from world_cup_intel.analysis.market_calibration import compute_log_loss
+from world_cup_intel.analysis.market_calibration import compute_reliability_gap
 from world_cup_intel.analysis.market_calibration import settle_handicap_line
 from world_cup_intel.analysis.market_calibration import settle_total_line
+from world_cup_intel.analysis.market_calibration import split_rows_by_time
 
 
 def test_build_probability_band_key_groups_probability_into_expected_band():
@@ -384,3 +392,66 @@ def test_build_totals_profile_defaults_empty_samples_to_uniform_trinary_prior():
     assert round(profile["over_probability"], 6) == round(1 / 3, 6)
     assert round(profile["push_probability"], 6) == round(1 / 3, 6)
     assert round(profile["under_probability"], 6) == round(1 / 3, 6)
+
+
+def test_split_rows_by_time_sends_older_rows_to_fit_set():
+    fit_rows, validation_rows = split_rows_by_time(
+        [
+            {"captured_at": datetime(2026, 6, 10), "value": 1},
+            {"captured_at": datetime(2026, 6, 20), "value": 2},
+            {"captured_at": datetime(2026, 6, 21), "value": 3},
+        ],
+        split_at=datetime(2026, 6, 20),
+    )
+
+    assert [row["value"] for row in fit_rows] == [1]
+    assert [row["value"] for row in validation_rows] == [2, 3]
+
+
+def test_compute_brier_score_is_zero_for_perfect_predictions():
+    score = compute_brier_score(
+        rows=[
+            {"predicted_probability": 1.0, "actual_outcome": 1.0},
+            {"predicted_probability": 0.0, "actual_outcome": 0.0},
+        ]
+    )
+
+    assert score == 0.0
+
+
+def test_compute_log_loss_penalizes_overconfident_misses_more():
+    conservative = compute_log_loss(
+        rows=[{"predicted_probability": 0.60, "actual_outcome": 0.0}]
+    )
+    aggressive = compute_log_loss(
+        rows=[{"predicted_probability": 0.95, "actual_outcome": 0.0}]
+    )
+
+    assert aggressive > conservative
+
+
+def test_compute_reliability_gap_stays_within_probability_bounds():
+    gap = compute_reliability_gap(
+        rows=[
+            {"predicted_probability": 0.60, "actual_outcome": 1.0},
+            {"predicted_probability": 0.62, "actual_outcome": 0.0},
+            {"predicted_probability": 0.61, "actual_outcome": 1.0},
+        ],
+        bucket_size=0.1,
+    )
+
+    assert 0.0 <= gap <= 1.0
+
+
+def test_compute_reliability_gap_respects_bucket_boundaries_for_float_edges():
+    gap = compute_reliability_gap(
+        rows=[
+            {"predicted_probability": 0.30, "actual_outcome": 1.0},
+            {"predicted_probability": 0.39, "actual_outcome": 0.0},
+            {"predicted_probability": 0.60, "actual_outcome": 1.0},
+            {"predicted_probability": 0.69, "actual_outcome": 0.0},
+        ],
+        bucket_size=0.1,
+    )
+
+    assert gap == pytest.approx(0.15)

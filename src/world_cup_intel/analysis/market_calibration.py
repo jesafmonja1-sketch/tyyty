@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+import math
 
 
 def build_probability_band_key(probability: float) -> str:
@@ -470,3 +471,52 @@ def calibrate_totals_market(
             "profile_version": None if profile is None else profile.get("profile_version"),
         },
     }
+
+
+def split_rows_by_time(rows: list[dict], split_at: datetime) -> tuple[list[dict], list[dict]]:
+    fit_rows = [row for row in rows if row["captured_at"] < split_at]
+    validation_rows = [row for row in rows if row["captured_at"] >= split_at]
+    return fit_rows, validation_rows
+
+
+def compute_brier_score(*, rows: list[dict[str, float]]) -> float:
+    if not rows:
+        return 0.0
+    return round(
+        sum((row["predicted_probability"] - row["actual_outcome"]) ** 2 for row in rows) / len(rows),
+        6,
+    )
+
+
+def compute_log_loss(*, rows: list[dict[str, float]]) -> float:
+    if not rows:
+        return 0.0
+    epsilon = 1e-9
+    total = 0.0
+    for row in rows:
+        probability = min(max(row["predicted_probability"], epsilon), 1.0 - epsilon)
+        outcome = row["actual_outcome"]
+        total += -(outcome * math.log(probability) + (1.0 - outcome) * math.log(1.0 - probability))
+    return round(total / len(rows), 6)
+
+
+def compute_reliability_gap(*, rows: list[dict[str, float]], bucket_size: float = 0.1) -> float:
+    if not rows:
+        return 0.0
+    if bucket_size <= 0:
+        raise ValueError("bucket_size must be positive")
+
+    grouped: dict[tuple[float, float], list[dict[str, float]]] = {}
+    for row in rows:
+        bucket_index = int((row["predicted_probability"] + 1e-12) / bucket_size)
+        lower = bucket_index * bucket_size
+        lower = min(max(lower, 0.0), 1.0)
+        upper = min(lower + bucket_size, 1.0)
+        grouped.setdefault((lower, upper), []).append(row)
+
+    gap = 0.0
+    for bucket_rows in grouped.values():
+        average_probability = sum(row["predicted_probability"] for row in bucket_rows) / len(bucket_rows)
+        average_outcome = sum(row["actual_outcome"] for row in bucket_rows) / len(bucket_rows)
+        gap += abs(average_probability - average_outcome) * (len(bucket_rows) / len(rows))
+    return round(gap, 6)
