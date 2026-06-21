@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Index, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -10,6 +10,9 @@ class Base(DeclarativeBase):
 
 class RawSourceRun(Base):
     __tablename__ = "raw_source_runs"
+    __table_args__ = (
+        Index("ix_raw_source_runs_source_name_captured_at_status", "source_name", "captured_at", "status"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     source_name: Mapped[str] = mapped_column(String(100))
     endpoint: Mapped[str] = mapped_column(String(255))
@@ -100,6 +103,11 @@ class Venue(Base):
 
 class Match(Base):
     __tablename__ = "matches"
+    __table_args__ = (
+        Index("ix_matches_status_kickoff_at", "status", "kickoff_at"),
+        Index("ix_matches_home_team_id_kickoff_at", "home_team_id", "kickoff_at"),
+        Index("ix_matches_away_team_id_kickoff_at", "away_team_id", "kickoff_at"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     external_id: Mapped[str] = mapped_column(String(80), unique=True)
     competition: Mapped[str] = mapped_column(String(120))
@@ -147,6 +155,9 @@ class MatchKeyEvent(Base):
 
 class OddsMarket(Base):
     __tablename__ = "odds_markets"
+    __table_args__ = (
+        Index("ix_odds_markets_match_id_market_type_bookmaker_name", "match_id", "market_type", "bookmaker_name"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
     source_name: Mapped[str] = mapped_column(String(80))
@@ -156,6 +167,9 @@ class OddsMarket(Base):
 
 class OddsQuote(Base):
     __tablename__ = "odds_quotes"
+    __table_args__ = (
+        Index("ix_odds_quotes_odds_market_id_captured_at", "odds_market_id", "captured_at"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     odds_market_id: Mapped[int] = mapped_column(ForeignKey("odds_markets.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
@@ -296,10 +310,71 @@ class PlayerImpactRating(Base):
 
 class PredictionRun(Base):
     __tablename__ = "prediction_runs"
+    __table_args__ = (
+        Index("ix_prediction_runs_match_id_captured_at", "match_id", "captured_at"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
     captured_at: Mapped[datetime] = mapped_column(DateTime)
     model_version: Mapped[str] = mapped_column(String(40))
+
+
+class MatchFeatureSnapshot(Base):
+    __tablename__ = "match_feature_snapshots"
+    __table_args__ = (
+        UniqueConstraint("prediction_run_id", name="uq_match_feature_snapshots_prediction_run"),
+        Index("ix_match_feature_snapshots_prediction_run_id", "prediction_run_id"),
+        Index("ix_match_feature_snapshots_match_id_captured_at", "match_id", "captured_at"),
+    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    prediction_run_id: Mapped[int] = mapped_column(ForeignKey("prediction_runs.id"))
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
+    captured_at: Mapped[datetime] = mapped_column(DateTime)
+    model_version: Mapped[str] = mapped_column(String(40))
+    home_overall_score: Mapped[float] = mapped_column(Float)
+    away_overall_score: Mapped[float] = mapped_column(Float)
+    home_attack_score: Mapped[float] = mapped_column(Float)
+    away_attack_score: Mapped[float] = mapped_column(Float)
+    home_defense_score: Mapped[float] = mapped_column(Float)
+    away_defense_score: Mapped[float] = mapped_column(Float)
+    home_recent_form_score: Mapped[float] = mapped_column(Float)
+    away_recent_form_score: Mapped[float] = mapped_column(Float)
+    power_delta: Mapped[float] = mapped_column(Float)
+    attack_delta: Mapped[float] = mapped_column(Float)
+    defense_delta: Mapped[float] = mapped_column(Float)
+    form_delta: Mapped[float] = mapped_column(Float)
+    home_learning_readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
+    away_learning_readiness_score: Mapped[float] = mapped_column(Float, default=0.0)
+    home_learning_momentum_score: Mapped[float] = mapped_column(Float, default=0.0)
+    away_learning_momentum_score: Mapped[float] = mapped_column(Float, default=0.0)
+    home_tactical_continuity_score: Mapped[float] = mapped_column(Float, default=0.0)
+    away_tactical_continuity_score: Mapped[float] = mapped_column(Float, default=0.0)
+    learning_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    tactical_continuity_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    home_availability_alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    away_availability_alert_count: Mapped[int] = mapped_column(Integer, default=0)
+    home_minutes_risk_score: Mapped[float] = mapped_column(Float, default=0.0)
+    away_minutes_risk_score: Mapped[float] = mapped_column(Float, default=0.0)
+    discipline_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    environment_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    weather_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    referee_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    motivation_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    fatigue_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    scenario_pressure_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    goal_difference_pressure_delta: Mapped[float] = mapped_column(Float, default=0.0)
+    market_handicap_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_total_line: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_home_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_draw_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_away_probability: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_over_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    market_under_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    lambda_home: Mapped[float] = mapped_column(Float)
+    lambda_away: Mapped[float] = mapped_column(Float)
+    projected_tempo_score: Mapped[float] = mapped_column(Float, default=0.0)
+    learning_adjustment: Mapped[float] = mapped_column(Float, default=0.0)
+    feature_payload_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class MatchPrediction(Base):
@@ -325,6 +400,9 @@ class MatchPrediction(Base):
 
 class PredictionFactor(Base):
     __tablename__ = "prediction_factors"
+    __table_args__ = (
+        Index("ix_prediction_factors_prediction_run_id_factor_name", "prediction_run_id", "factor_name"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     prediction_run_id: Mapped[int] = mapped_column(ForeignKey("prediction_runs.id"))
     factor_name: Mapped[str] = mapped_column(String(60))
@@ -334,6 +412,9 @@ class PredictionFactor(Base):
 
 class MatchReview(Base):
     __tablename__ = "match_reviews"
+    __table_args__ = (
+        Index("ix_match_reviews_match_id_team_id_created_at", "match_id", "national_team_id", "created_at"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     match_id: Mapped[int] = mapped_column(ForeignKey("matches.id"))
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
@@ -348,6 +429,7 @@ class TeamLearningSnapshot(Base):
     __tablename__ = "team_learning_snapshots"
     __table_args__ = (
         UniqueConstraint("national_team_id", "match_id", name="uq_team_learning_snapshots_team_match"),
+        Index("ix_team_learning_snapshots_team_id_captured_at", "national_team_id", "captured_at"),
     )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
@@ -375,6 +457,10 @@ class PostMatchRefreshRun(Base):
 
 class TeamChangeLog(Base):
     __tablename__ = "team_change_logs"
+    __table_args__ = (
+        Index("ix_team_change_logs_team_id_created_at", "national_team_id", "created_at"),
+        Index("ix_team_change_logs_match_id_created_at", "match_id", "created_at"),
+    )
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     national_team_id: Mapped[int] = mapped_column(ForeignKey("national_teams.id"))
     match_id: Mapped[int | None] = mapped_column(ForeignKey("matches.id"), nullable=True)
