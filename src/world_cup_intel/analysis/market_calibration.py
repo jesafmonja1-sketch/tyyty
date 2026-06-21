@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 
 def build_probability_band_key(probability: float) -> str:
     if probability < 0.15:
@@ -140,3 +142,86 @@ def choose_profile_with_fallback(
             pending_keys.insert(0, next_key)
 
     return None
+
+
+def _laplace_binary(successes: float, total: int, *, alpha: float = 1.0) -> float:
+    return (successes + alpha) / (total + 2 * alpha)
+
+
+def _laplace_trinary(first: float, second: float, third: float, *, alpha: float = 1.0) -> dict[str, float]:
+    total = first + second + third
+    denominator = total + 3 * alpha
+    return {
+        "first": (first + alpha) / denominator,
+        "second": (second + alpha) / denominator,
+        "third": (third + alpha) / denominator,
+    }
+
+
+def build_one_x_two_profile(
+    *,
+    rows: list[dict],
+    bucket_key: str,
+    profile_version: str,
+    captured_at: datetime | str,
+):
+    sample_count = len(rows)
+    hit_count = sum(float(row["outcome_hit"]) for row in rows)
+    return {
+        "market_family": "1x2",
+        "bucket_key": bucket_key,
+        "profile_version": profile_version,
+        "sample_count": sample_count,
+        "captured_at": captured_at,
+        "calibrated_hit_rate": _laplace_binary(hit_count, sample_count),
+    }
+
+
+def build_handicap_profile(
+    *,
+    rows: list[dict],
+    bucket_key: str,
+    profile_version: str,
+    captured_at: datetime | str,
+):
+    sample_count = len(rows)
+    smoothed = _laplace_trinary(
+        sum(float(row["cover"]) for row in rows),
+        sum(float(row["push"]) for row in rows),
+        sum(float(row["fail"]) for row in rows),
+    )
+    return {
+        "market_family": "handicap",
+        "bucket_key": bucket_key,
+        "profile_version": profile_version,
+        "sample_count": sample_count,
+        "captured_at": captured_at,
+        "cover_probability": smoothed["first"],
+        "push_probability": smoothed["second"],
+        "fail_probability": smoothed["third"],
+    }
+
+
+def build_totals_profile(
+    *,
+    rows: list[dict],
+    bucket_key: str,
+    profile_version: str,
+    captured_at: datetime | str,
+):
+    sample_count = len(rows)
+    smoothed = _laplace_trinary(
+        sum(float(row["over"]) for row in rows),
+        sum(float(row["push"]) for row in rows),
+        sum(float(row["under"]) for row in rows),
+    )
+    return {
+        "market_family": "totals",
+        "bucket_key": bucket_key,
+        "profile_version": profile_version,
+        "sample_count": sample_count,
+        "captured_at": captured_at,
+        "over_probability": smoothed["first"],
+        "push_probability": smoothed["second"],
+        "under_probability": smoothed["third"],
+    }

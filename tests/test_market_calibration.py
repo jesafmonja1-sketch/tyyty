@@ -1,5 +1,8 @@
 from world_cup_intel.analysis.market_calibration import build_handicap_bucket_key
+from world_cup_intel.analysis.market_calibration import build_handicap_profile
+from world_cup_intel.analysis.market_calibration import build_one_x_two_profile
 from world_cup_intel.analysis.market_calibration import build_probability_band_key
+from world_cup_intel.analysis.market_calibration import build_totals_profile
 from world_cup_intel.analysis.market_calibration import build_totals_bucket_key
 from world_cup_intel.analysis.market_calibration import choose_profile_with_fallback
 from world_cup_intel.analysis.market_calibration import settle_handicap_line
@@ -229,3 +232,155 @@ def test_choose_profile_with_fallback_supports_market_family_and_tuple_profile_k
 
     assert chosen["bucket_key"] == "hcp_-0.25_-0.75"
     assert chosen["fallback_level"] == 1
+
+
+def test_build_one_x_two_profile_preserves_bucket_and_reports_smoothed_hit_rate():
+    profile = build_one_x_two_profile(
+        rows=[
+            {"outcome_hit": 1.0},
+            {"outcome_hit": 0.0},
+            {"outcome_hit": 1.0},
+            {"outcome_hit": 1.0},
+        ],
+        bucket_key="p_0.60_0.75",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["market_family"] == "1x2"
+    assert profile["bucket_key"] == "p_0.60_0.75"
+    assert profile["profile_version"] == "v1"
+    assert profile["sample_count"] == 4
+    assert profile["captured_at"] == "2026-06-21T18:00:00Z"
+    assert 0.5 < profile["calibrated_hit_rate"] < 0.9
+
+
+def test_build_one_x_two_profile_uses_expected_laplace_binary_value():
+    profile = build_one_x_two_profile(
+        rows=[
+            {"outcome_hit": 1.0},
+            {"outcome_hit": 0.0},
+            {"outcome_hit": 1.0},
+            {"outcome_hit": 1.0},
+        ],
+        bucket_key="p_0.60_0.75",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert round(profile["calibrated_hit_rate"], 6) == round(4 / 6, 6)
+
+
+def test_build_one_x_two_profile_defaults_empty_samples_to_even_rate():
+    profile = build_one_x_two_profile(
+        rows=[],
+        bucket_key="p_0.30_0.45",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["sample_count"] == 0
+    assert profile["calibrated_hit_rate"] == 0.5
+
+
+def test_build_handicap_profile_uses_smoothing_and_normalizes_probabilities():
+    profile = build_handicap_profile(
+        rows=[
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+        ],
+        bucket_key="hcp_-1.00_-1.50",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["market_family"] == "handicap"
+    assert profile["cover_probability"] < 1.0
+    assert round(
+        profile["cover_probability"] + profile["push_probability"] + profile["fail_probability"],
+        6,
+    ) == 1.0
+
+
+def test_build_handicap_profile_uses_expected_laplace_trinary_values():
+    profile = build_handicap_profile(
+        rows=[
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+            {"cover": 1.0, "push": 0.0, "fail": 0.0},
+        ],
+        bucket_key="hcp_-1.00_-1.50",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert round(profile["cover_probability"], 6) == round(4 / 6, 6)
+    assert round(profile["push_probability"], 6) == round(1 / 6, 6)
+    assert round(profile["fail_probability"], 6) == round(1 / 6, 6)
+
+
+def test_build_handicap_profile_defaults_empty_samples_to_uniform_trinary_prior():
+    profile = build_handicap_profile(
+        rows=[],
+        bucket_key="hcp_-0.25_-0.75",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["sample_count"] == 0
+    assert round(profile["cover_probability"], 6) == round(1 / 3, 6)
+    assert round(profile["push_probability"], 6) == round(1 / 3, 6)
+    assert round(profile["fail_probability"], 6) == round(1 / 3, 6)
+
+
+def test_build_totals_profile_normalizes_trinary_probabilities():
+    profile = build_totals_profile(
+        rows=[
+            {"over": 1.0, "push": 0.0, "under": 0.0},
+            {"over": 0.0, "push": 1.0, "under": 0.0},
+            {"over": 0.0, "push": 0.0, "under": 1.0},
+            {"over": 0.0, "push": 0.0, "under": 1.0},
+        ],
+        bucket_key="totals_2.5_3.0",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["market_family"] == "totals"
+    assert round(
+        profile["over_probability"] + profile["push_probability"] + profile["under_probability"],
+        6,
+    ) == 1.0
+
+
+def test_build_totals_profile_uses_expected_laplace_trinary_values():
+    profile = build_totals_profile(
+        rows=[
+            {"over": 1.0, "push": 0.0, "under": 0.0},
+            {"over": 0.0, "push": 1.0, "under": 0.0},
+            {"over": 0.0, "push": 0.0, "under": 1.0},
+            {"over": 0.0, "push": 0.0, "under": 1.0},
+        ],
+        bucket_key="totals_2.5_3.0",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert round(profile["over_probability"], 6) == round(2 / 7, 6)
+    assert round(profile["push_probability"], 6) == round(2 / 7, 6)
+    assert round(profile["under_probability"], 6) == round(3 / 7, 6)
+
+
+def test_build_totals_profile_defaults_empty_samples_to_uniform_trinary_prior():
+    profile = build_totals_profile(
+        rows=[],
+        bucket_key="totals_2.5",
+        profile_version="v1",
+        captured_at="2026-06-21T18:00:00Z",
+    )
+
+    assert profile["sample_count"] == 0
+    assert round(profile["over_probability"], 6) == round(1 / 3, 6)
+    assert round(profile["push_probability"], 6) == round(1 / 3, 6)
+    assert round(profile["under_probability"], 6) == round(1 / 3, 6)
