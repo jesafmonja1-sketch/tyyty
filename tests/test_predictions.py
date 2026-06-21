@@ -8,6 +8,7 @@ from world_cup_intel.analysis.predictions import build_toto_recommendation
 from world_cup_intel.analysis.predictions import diagnose_prediction
 from world_cup_intel.analysis.predictions import generate_match_prediction
 from world_cup_intel.schema import (
+    MarketCalibrationProfile,
     Match,
     MatchContextSnapshot,
     MatchFeatureSnapshot,
@@ -1781,3 +1782,419 @@ def test_generate_match_prediction_persists_market_probabilities_in_feature_snap
         + snapshot.market_away_probability,
         6,
     ) == 1.0
+
+
+def test_generate_match_prediction_populates_calibration_fields_with_fallback(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-fallback",
+        home_code="CLH",
+        away_code="CLA",
+        kickoff_at=datetime(2026, 7, 14, 18, 0, 0),
+        home_attack=79.0,
+        home_defense=76.0,
+        away_attack=74.0,
+        away_defense=72.0,
+    )
+    session.add_all(
+        [
+            OddsMarket(
+                match_id=match_row.id,
+                source_name="odds-data",
+                bookmaker_name="FallbackBook",
+                market_type="handicap",
+            ),
+            OddsMarket(
+                match_id=match_row.id,
+                source_name="odds-data",
+                bookmaker_name="FallbackBook",
+                market_type="totals",
+            ),
+        ]
+    )
+    session.flush()
+    markets = session.query(OddsMarket).filter_by(match_id=match_row.id).all()
+    handicap_market = next(market for market in markets if market.market_type == "handicap")
+    totals_market = next(market for market in markets if market.market_type == "totals")
+    session.add_all(
+        [
+            OddsQuote(
+                odds_market_id=handicap_market.id,
+                captured_at=datetime(2026, 7, 14, 12, 30, 0),
+                line_value=-0.25,
+                home_price=1.91,
+                draw_price=None,
+                away_price=1.95,
+                over_price=None,
+                under_price=None,
+            ),
+            OddsQuote(
+                odds_market_id=totals_market.id,
+                captured_at=datetime(2026, 7, 14, 12, 35, 0),
+                line_value=2.75,
+                home_price=None,
+                draw_price=None,
+                away_price=None,
+                over_price=1.93,
+                under_price=1.91,
+            ),
+        ]
+    )
+
+    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 14, 13, 0, 0))
+    session.commit()
+
+    assert prediction.calibrated_home_win_probability is not None
+    assert prediction.calibrated_draw_probability is not None
+    assert prediction.calibrated_away_win_probability is not None
+    assert prediction.handicap_cover_probability is not None
+    assert prediction.handicap_push_probability is not None
+    assert prediction.handicap_fail_probability is not None
+    assert prediction.totals_over_probability is not None
+    assert prediction.totals_push_probability is not None
+    assert prediction.totals_under_probability is not None
+    assert prediction.recommended_totals_side is not None
+    assert prediction.calibration_summary_json is not None
+
+
+def test_generate_match_prediction_stores_calibration_summary_sections(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-summary",
+        home_code="CSH",
+        away_code="CSA",
+        kickoff_at=datetime(2026, 7, 15, 18, 0, 0),
+        home_attack=77.0,
+        home_defense=75.0,
+        away_attack=75.0,
+        away_defense=74.0,
+    )
+
+    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 0, 0))
+
+    assert {"1x2", "handicap", "totals"}.issubset(prediction.calibration_summary_json)
+
+
+def test_generate_match_prediction_uses_matching_market_profiles_when_available(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-profile-hit",
+        home_code="CPH",
+        away_code="CPA",
+        kickoff_at=datetime(2026, 7, 15, 21, 0, 0),
+        home_attack=78.0,
+        home_defense=75.0,
+        away_attack=74.0,
+        away_defense=73.0,
+    )
+    session.add_all(
+        [
+            OddsMarket(
+                match_id=match_row.id,
+                source_name="odds-data",
+                bookmaker_name="ProfileBook",
+                market_type="handicap",
+            ),
+            OddsMarket(
+                match_id=match_row.id,
+                source_name="odds-data",
+                bookmaker_name="ProfileBook",
+                market_type="totals",
+            ),
+        ]
+    )
+    session.flush()
+    markets = session.query(OddsMarket).filter_by(match_id=match_row.id).all()
+    handicap_market = next(market for market in markets if market.market_type == "handicap")
+    totals_market = next(market for market in markets if market.market_type == "totals")
+    session.add_all(
+        [
+            OddsQuote(
+                odds_market_id=handicap_market.id,
+                captured_at=datetime(2026, 7, 15, 12, 30, 0),
+                line_value=-0.25,
+                home_price=1.89,
+                draw_price=None,
+                away_price=1.97,
+                over_price=None,
+                under_price=None,
+            ),
+            OddsQuote(
+                odds_market_id=totals_market.id,
+                captured_at=datetime(2026, 7, 15, 12, 35, 0),
+                line_value=2.75,
+                home_price=None,
+                draw_price=None,
+                away_price=None,
+                over_price=1.95,
+                under_price=1.89,
+            ),
+        ]
+    )
+
+    baseline = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 0, 0))
+    baseline_summary = baseline.calibration_summary_json
+
+    session.add_all(
+        [
+            MarketCalibrationProfile(
+                market_family="1x2",
+                bucket_key=baseline_summary["1x2"]["bucket_key"],
+                profile_version="v1",
+                sample_count=120,
+                fallback_bucket_key=None,
+                profile_json={
+                    "market_family": "1x2",
+                    "bucket_key": baseline_summary["1x2"]["bucket_key"],
+                    "profile_version": "v1",
+                    "sample_count": 120,
+                    "calibrated_hit_rate": 0.82,
+                },
+                updated_at=datetime(2026, 7, 15, 12, 45, 0),
+            ),
+            MarketCalibrationProfile(
+                market_family="handicap",
+                bucket_key=baseline_summary["handicap"]["bucket_key"],
+                profile_version="v1",
+                sample_count=120,
+                fallback_bucket_key=None,
+                profile_json={
+                    "market_family": "handicap",
+                    "bucket_key": baseline_summary["handicap"]["bucket_key"],
+                    "profile_version": "v1",
+                    "sample_count": 120,
+                    "cover_probability": 0.62,
+                    "push_probability": 0.13,
+                    "fail_probability": 0.25,
+                },
+                updated_at=datetime(2026, 7, 15, 12, 45, 0),
+            ),
+            MarketCalibrationProfile(
+                market_family="totals",
+                bucket_key=baseline_summary["totals"]["bucket_key"],
+                profile_version="v1",
+                sample_count=120,
+                fallback_bucket_key=None,
+                profile_json={
+                    "market_family": "totals",
+                    "bucket_key": baseline_summary["totals"]["bucket_key"],
+                    "profile_version": "v1",
+                    "sample_count": 120,
+                    "over_probability": 0.31,
+                    "push_probability": 0.18,
+                    "under_probability": 0.51,
+                },
+                updated_at=datetime(2026, 7, 15, 12, 45, 0),
+            ),
+        ]
+    )
+
+    calibrated = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 30, 0))
+
+    assert calibrated.calibration_summary_json["1x2"]["source"] == "profile"
+    assert calibrated.calibration_summary_json["1x2"]["fallback_level"] == 0
+    assert calibrated.calibration_summary_json["handicap"]["source"] == "profile"
+    assert calibrated.calibration_summary_json["handicap"]["fallback_level"] == 0
+    assert calibrated.calibration_summary_json["totals"]["source"] == "profile"
+    assert calibrated.calibration_summary_json["totals"]["fallback_level"] == 0
+    assert calibrated.calibrated_home_win_probability != baseline.calibrated_home_win_probability
+    assert calibrated.handicap_cover_probability == pytest.approx(0.62)
+    assert calibrated.handicap_push_probability == pytest.approx(0.13)
+    assert calibrated.handicap_fail_probability == pytest.approx(0.25)
+    assert calibrated.totals_over_probability == pytest.approx(0.31)
+    assert calibrated.totals_push_probability == pytest.approx(0.18)
+    assert calibrated.totals_under_probability == pytest.approx(0.51)
+    assert calibrated.recommended_totals_side == "under"
+
+
+def test_generate_match_prediction_ignores_future_profile_versions(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-profile-as-of",
+        home_code="APH",
+        away_code="APA",
+        kickoff_at=datetime(2026, 7, 15, 22, 0, 0),
+        home_attack=79.0,
+        home_defense=76.0,
+        away_attack=74.0,
+        away_defense=72.0,
+    )
+
+    baseline = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 0, 0))
+    bucket_key = baseline.calibration_summary_json["1x2"]["bucket_key"]
+    session.add_all(
+        [
+            MarketCalibrationProfile(
+                market_family="1x2",
+                bucket_key=bucket_key,
+                profile_version="v1",
+                sample_count=80,
+                fallback_bucket_key=None,
+                profile_json={
+                    "calibrated_hit_rate": 0.70,
+                },
+                updated_at=datetime(2026, 7, 15, 12, 0, 0),
+            ),
+            MarketCalibrationProfile(
+                market_family="1x2",
+                bucket_key=bucket_key,
+                profile_version="v2",
+                sample_count=95,
+                fallback_bucket_key=None,
+                profile_json={
+                    "calibrated_hit_rate": 0.90,
+                },
+                updated_at=datetime(2026, 7, 15, 14, 0, 0),
+            ),
+        ]
+    )
+
+    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 30, 0))
+
+    assert prediction.calibration_summary_json["1x2"]["source"] == "profile"
+    assert prediction.calibration_summary_json["1x2"]["profile_version"] == "v1"
+    assert prediction.calibration_summary_json["1x2"]["sample_count"] == 80
+    assert prediction.calibrated_home_win_probability < 0.90
+
+
+def test_generate_match_prediction_uses_nearest_fallback_bucket_when_exact_bucket_missing(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-missing-exact-bucket",
+        home_code="FBH",
+        away_code="FBA",
+        kickoff_at=datetime(2026, 7, 15, 23, 0, 0),
+        home_attack=76.0,
+        home_defense=74.0,
+        away_attack=72.0,
+        away_defense=71.0,
+    )
+    market = OddsMarket(
+        match_id=match_row.id,
+        source_name="odds-data",
+        bookmaker_name="FallbackBook",
+        market_type="totals",
+    )
+    session.add(market)
+    session.flush()
+    session.add(
+        OddsQuote(
+            odds_market_id=market.id,
+            captured_at=datetime(2026, 7, 15, 12, 20, 0),
+            line_value=1.75,
+            home_price=None,
+            draw_price=None,
+            away_price=None,
+            over_price=1.88,
+            under_price=1.96,
+        )
+    )
+    session.add(
+        MarketCalibrationProfile(
+            market_family="totals",
+            bucket_key="totals_2.0_2.5",
+            profile_version="v1",
+            sample_count=110,
+            fallback_bucket_key=None,
+            profile_json={
+                "over_probability": 0.44,
+                "push_probability": 0.16,
+                "under_probability": 0.40,
+            },
+            updated_at=datetime(2026, 7, 15, 12, 0, 0),
+        )
+    )
+
+    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 15, 13, 0, 0))
+
+    assert prediction.calibration_summary_json["totals"]["source"] == "profile"
+    assert prediction.calibration_summary_json["totals"]["bucket_key"] == "totals_1.8"
+    assert prediction.calibration_summary_json["totals"]["selected_bucket_key"] == "totals_2.0_2.5"
+    assert prediction.calibration_summary_json["totals"]["fallback_level"] == 1
+    assert prediction.totals_over_probability == pytest.approx(0.44)
+    assert prediction.totals_push_probability == pytest.approx(0.16)
+    assert prediction.totals_under_probability == pytest.approx(0.40)
+
+
+def test_generate_match_prediction_persists_market_total_line_in_feature_snapshot(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-market-total",
+        home_code="MTH",
+        away_code="MTA",
+        kickoff_at=datetime(2026, 7, 16, 18, 0, 0),
+        home_attack=78.0,
+        home_defense=74.0,
+        away_attack=76.0,
+        away_defense=73.0,
+    )
+    market = OddsMarket(
+        match_id=match_row.id,
+        source_name="odds-data",
+        bookmaker_name="TotalsBook",
+        market_type="totals",
+    )
+    session.add(market)
+    session.flush()
+    session.add(
+        OddsQuote(
+            odds_market_id=market.id,
+            captured_at=datetime(2026, 7, 16, 12, 30, 0),
+            line_value=3.0,
+            home_price=None,
+            draw_price=None,
+            away_price=None,
+            over_price=1.95,
+            under_price=1.89,
+        )
+    )
+
+    generate_match_prediction(session, match_row.id, datetime(2026, 7, 16, 13, 0, 0))
+    session.commit()
+
+    snapshot = session.query(MatchFeatureSnapshot).one()
+    assert snapshot.market_total_line == 3.0
+
+
+def test_generate_match_prediction_marks_fair_total_line_fallback_in_summary(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-fair-total-fallback",
+        home_code="FTH",
+        away_code="FTA",
+        kickoff_at=datetime(2026, 7, 16, 21, 0, 0),
+        home_attack=77.0,
+        home_defense=74.0,
+        away_attack=73.0,
+        away_defense=72.0,
+    )
+
+    prediction = generate_match_prediction(session, match_row.id, datetime(2026, 7, 16, 13, 0, 0))
+
+    assert prediction.calibration_summary_json["totals"]["source"] == "fallback"
+    assert prediction.calibration_summary_json["totals"]["market_line"] == prediction.fair_total_line
+    assert prediction.calibration_summary_json["totals"]["line_source"] == "fair_total_line"
+    assert prediction.calibration_summary_json["totals"]["fallback_level"] is None
+
+
+def test_diagnose_prediction_surfaces_calibration_information(session):
+    match_row = _build_math_engine_match(
+        session,
+        external_id="wc-calibration-diagnostic",
+        home_code="CDH",
+        away_code="CDA",
+        kickoff_at=datetime(2026, 7, 17, 18, 0, 0),
+        home_attack=76.0,
+        home_defense=74.0,
+        away_attack=73.0,
+        away_defense=72.0,
+    )
+
+    generate_match_prediction(session, match_row.id, datetime(2026, 7, 17, 13, 0, 0))
+    session.commit()
+
+    diagnostic = diagnose_prediction(session, match_row.id)
+
+    assert any("calibration 1x2 source:" in line.lower() for line in diagnostic.issue_hints)
+    assert any("calibration handicap bucket:" in line.lower() for line in diagnostic.issue_hints)
+    assert any("calibration totals line source:" in line.lower() for line in diagnostic.issue_hints)

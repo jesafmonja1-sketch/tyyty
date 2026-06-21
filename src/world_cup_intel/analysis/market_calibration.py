@@ -225,3 +225,248 @@ def build_totals_profile(
         "push_probability": smoothed["second"],
         "under_probability": smoothed["third"],
     }
+
+
+def _normalize_probabilities(probabilities: dict[str, float]) -> dict[str, float]:
+    total = sum(probabilities.values())
+    if total <= 0:
+        raise ValueError("probabilities must sum to a positive value")
+    return {key: value / total for key, value in probabilities.items()}
+
+
+def _one_x_two_fallback_bucket_keys(bucket_key: str) -> list[str]:
+    ordered_keys = [
+        "p_0.00_0.15",
+        "p_0.15_0.30",
+        "p_0.30_0.45",
+        "p_0.45_0.60",
+        "p_0.60_0.75",
+        "p_0.75_1.00",
+    ]
+    if bucket_key not in ordered_keys:
+        return []
+    index = ordered_keys.index(bucket_key)
+    fallback_keys: list[str] = []
+    if index > 0:
+        fallback_keys.append(ordered_keys[index - 1])
+    if index < len(ordered_keys) - 1:
+        fallback_keys.append(ordered_keys[index + 1])
+    return fallback_keys
+
+
+def _handicap_fallback_bucket_keys(bucket_key: str) -> list[str]:
+    if bucket_key == "hcp_-2.75_deeper":
+        return ["hcp_-1.75_-2.50"]
+    if bucket_key == "hcp_-1.75_-2.50":
+        return ["hcp_-1.00_-1.50", "hcp_-2.75_deeper"]
+    if bucket_key == "hcp_-1.00_-1.50":
+        return ["hcp_-0.25_-0.75", "hcp_-1.75_-2.50"]
+    if bucket_key == "hcp_-0.25_-0.75":
+        return ["hcp_-1.00_-1.50"]
+    return ["hcp_-0.25_-0.75", "hcp_-1.00_-1.50"]
+
+
+def _totals_fallback_bucket_keys(bucket_key: str) -> list[str]:
+    if bucket_key == "totals_3.0_3.5_plus":
+        return ["totals_3.0", "totals_2.5_3.0"]
+    if bucket_key == "totals_3.0":
+        return ["totals_2.5_3.0", "totals_3.0_3.5_plus"]
+    if bucket_key == "totals_2.5_3.0":
+        return ["totals_2.5", "totals_3.0", "totals_2.0_2.5"]
+    if bucket_key == "totals_2.5":
+        return ["totals_2.0_2.5", "totals_2.5_3.0"]
+    if bucket_key == "totals_2.0_2.5":
+        return ["totals_2.5", "totals_2.5_3.0"]
+    return ["totals_2.0_2.5", "totals_2.5", "totals_2.5_3.0"]
+
+
+def calibrate_one_x_two_market(
+    *,
+    home_probability: float,
+    draw_probability: float,
+    away_probability: float,
+    profiles: dict | None = None,
+    minimum_sample_count: int = 30,
+) -> dict[str, object]:
+    calibrated = _normalize_probabilities(
+        {
+            "home": home_probability,
+            "draw": draw_probability,
+            "away": away_probability,
+        }
+    )
+    profile = None
+    bucket_key = build_probability_band_key(max(calibrated.values()))
+    if profiles is not None:
+        profile = choose_profile_with_fallback(
+            profiles,
+            market_family="1x2",
+            exact_bucket_key=bucket_key,
+            fallback_bucket_keys=_one_x_two_fallback_bucket_keys(bucket_key),
+            minimum_sample_count=minimum_sample_count,
+        )
+
+    source = "fallback"
+    if profile is not None:
+        source = "profile"
+        strongest_outcome_key = max(calibrated, key=calibrated.get)
+        strongest_outcome_probability = calibrated[strongest_outcome_key]
+        target_hit_rate = float(profile.get("calibrated_hit_rate", strongest_outcome_probability))
+        calibrated_strongest_probability = min(
+            max((strongest_outcome_probability + target_hit_rate) / 2.0, 0.01),
+            0.95,
+        )
+        remaining_probability = 1.0 - calibrated_strongest_probability
+        raw_remaining_probability = 1.0 - strongest_outcome_probability
+        recalibrated: dict[str, float] = {}
+        for outcome_key, probability in calibrated.items():
+            if outcome_key == strongest_outcome_key:
+                recalibrated[outcome_key] = calibrated_strongest_probability
+                continue
+            if raw_remaining_probability <= 0:
+                recalibrated[outcome_key] = remaining_probability / 2.0
+            else:
+                recalibrated[outcome_key] = remaining_probability * (probability / raw_remaining_probability)
+        calibrated = _normalize_probabilities(recalibrated)
+
+    return {
+        "calibrated_home_win_probability": round(calibrated["home"], 6),
+        "calibrated_draw_probability": round(calibrated["draw"], 6),
+        "calibrated_away_win_probability": round(calibrated["away"], 6),
+        "summary": {
+            "market_family": "1x2",
+            "bucket_key": bucket_key,
+            "selected_bucket_key": bucket_key if profile is None else profile.get("bucket_key", bucket_key),
+            "source": source,
+            "fallback_level": None if profile is None else profile.get("fallback_level"),
+            "sample_count": None if profile is None else profile.get("sample_count"),
+            "profile_version": None if profile is None else profile.get("profile_version"),
+        },
+    }
+
+
+def calibrate_handicap_market(
+    *,
+    score_matrix: dict[tuple[int, int], float],
+    market_line: float,
+    profiles: dict | None = None,
+    minimum_sample_count: int = 30,
+) -> dict[str, object]:
+    cover = 0.0
+    push = 0.0
+    fail = 0.0
+    for (home_goals, away_goals), probability in score_matrix.items():
+        settled = settle_handicap_line(home_goals=home_goals, away_goals=away_goals, line=market_line)
+        cover += probability * settled["cover"]
+        push += probability * settled["push"]
+        fail += probability * settled["fail"]
+
+    calibrated = _normalize_probabilities(
+        {
+            "cover": cover,
+            "push": push,
+            "fail": fail,
+        }
+    )
+    profile = None
+    bucket_key = build_handicap_bucket_key(market_line)
+    if profiles is not None:
+        profile = choose_profile_with_fallback(
+            profiles,
+            market_family="handicap",
+            exact_bucket_key=bucket_key,
+            fallback_bucket_keys=_handicap_fallback_bucket_keys(bucket_key),
+            minimum_sample_count=minimum_sample_count,
+        )
+
+    source = "fallback"
+    if profile is not None:
+        source = "profile"
+        calibrated = _normalize_probabilities(
+            {
+                "cover": float(profile.get("cover_probability", calibrated["cover"])),
+                "push": float(profile.get("push_probability", calibrated["push"])),
+                "fail": float(profile.get("fail_probability", calibrated["fail"])),
+            }
+        )
+
+    return {
+        "handicap_cover_probability": round(calibrated["cover"], 6),
+        "handicap_push_probability": round(calibrated["push"], 6),
+        "handicap_fail_probability": round(calibrated["fail"], 6),
+        "summary": {
+            "market_family": "handicap",
+            "bucket_key": bucket_key,
+            "selected_bucket_key": bucket_key if profile is None else profile.get("bucket_key", bucket_key),
+            "market_line": market_line,
+            "source": source,
+            "fallback_level": None if profile is None else profile.get("fallback_level"),
+            "sample_count": None if profile is None else profile.get("sample_count"),
+            "profile_version": None if profile is None else profile.get("profile_version"),
+        },
+    }
+
+
+def calibrate_totals_market(
+    *,
+    score_matrix: dict[tuple[int, int], float],
+    market_line: float,
+    line_source: str = "market_total_line",
+    profiles: dict | None = None,
+    minimum_sample_count: int = 30,
+) -> dict[str, object]:
+    over = 0.0
+    push = 0.0
+    under = 0.0
+    for (home_goals, away_goals), probability in score_matrix.items():
+        settled = settle_total_line(total_goals=home_goals + away_goals, line=market_line)
+        over += probability * settled["over"]
+        push += probability * settled["push"]
+        under += probability * settled["under"]
+
+    calibrated = _normalize_probabilities(
+        {
+            "over": over,
+            "push": push,
+            "under": under,
+        }
+    )
+    profile = None
+    bucket_key = build_totals_bucket_key(market_line)
+    if profiles is not None:
+        profile = choose_profile_with_fallback(
+            profiles,
+            market_family="totals",
+            exact_bucket_key=bucket_key,
+            fallback_bucket_keys=_totals_fallback_bucket_keys(bucket_key),
+            minimum_sample_count=minimum_sample_count,
+        )
+
+    source = "fallback"
+    if profile is not None:
+        source = "profile"
+        calibrated = _normalize_probabilities(
+            {
+                "over": float(profile.get("over_probability", calibrated["over"])),
+                "push": float(profile.get("push_probability", calibrated["push"])),
+                "under": float(profile.get("under_probability", calibrated["under"])),
+            }
+        )
+
+    return {
+        "totals_over_probability": round(calibrated["over"], 6),
+        "totals_push_probability": round(calibrated["push"], 6),
+        "totals_under_probability": round(calibrated["under"], 6),
+        "recommended_totals_side": "over" if calibrated["over"] >= calibrated["under"] else "under",
+        "summary": {
+            "market_family": "totals",
+            "bucket_key": bucket_key,
+            "selected_bucket_key": bucket_key if profile is None else profile.get("bucket_key", bucket_key),
+            "market_line": market_line,
+            "line_source": line_source,
+            "source": source,
+            "fallback_level": None if profile is None else profile.get("fallback_level"),
+            "sample_count": None if profile is None else profile.get("sample_count"),
+            "profile_version": None if profile is None else profile.get("profile_version"),
+        },
+    }

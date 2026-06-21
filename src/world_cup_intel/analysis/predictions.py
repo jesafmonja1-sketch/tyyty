@@ -8,8 +8,12 @@ import random
 
 from sqlalchemy import desc, select
 
+from world_cup_intel.analysis.market_calibration import calibrate_handicap_market
+from world_cup_intel.analysis.market_calibration import calibrate_one_x_two_market
+from world_cup_intel.analysis.market_calibration import calibrate_totals_market
 from world_cup_intel.schema import (
     Match,
+    MarketCalibrationProfile,
     MatchContextSnapshot,
     MatchFeatureSnapshot,
     MatchWeatherSnapshot,
@@ -102,6 +106,16 @@ def _latest_market_handicap(session, match_id: int) -> float | None:
     return None if quote is None else quote.line_value
 
 
+def _latest_market_total(session, match_id: int) -> float | None:
+    quote = session.scalars(
+        select(OddsQuote)
+        .join(OddsMarket, OddsMarket.id == OddsQuote.odds_market_id)
+        .where(OddsMarket.match_id == match_id, OddsMarket.market_type == "totals")
+        .order_by(desc(OddsQuote.captured_at))
+    ).first()
+    return None if quote is None else quote.line_value
+
+
 def _latest_market_1x2(session, match_id: int) -> OddsQuote | None:
     return session.scalars(
         select(OddsQuote)
@@ -109,6 +123,33 @@ def _latest_market_1x2(session, match_id: int) -> OddsQuote | None:
         .where(OddsMarket.match_id == match_id, OddsMarket.market_type == "1x2")
         .order_by(desc(OddsQuote.captured_at))
     ).first()
+
+
+def _load_market_calibration_profiles(session, *, captured_at: datetime) -> dict[tuple[str, str], dict]:
+    rows = session.scalars(
+        select(MarketCalibrationProfile)
+        .where(MarketCalibrationProfile.updated_at <= captured_at)
+        .order_by(
+            MarketCalibrationProfile.market_family,
+            MarketCalibrationProfile.bucket_key,
+            desc(MarketCalibrationProfile.updated_at),
+            desc(MarketCalibrationProfile.profile_version),
+        )
+    ).all()
+    profiles: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        profile_key = (row.market_family, row.bucket_key)
+        if profile_key in profiles:
+            continue
+        payload = dict(row.profile_json or {})
+        payload["market_family"] = row.market_family
+        payload["bucket_key"] = row.bucket_key
+        payload["profile_version"] = row.profile_version
+        payload["sample_count"] = row.sample_count
+        payload["fallback_bucket_key"] = row.fallback_bucket_key
+        payload["updated_at"] = row.updated_at.isoformat()
+        profiles[profile_key] = payload
+    return profiles
 
 
 def _market_implied_probabilities(quote: OddsQuote | None) -> tuple[float, float, float] | None:
@@ -768,6 +809,7 @@ def _distribution_from_score_matrix(
         "over_2_5_probability": over_2_5,
         "under_2_5_probability": 1.0 - over_2_5,
         "likely_scorelines": ",".join(likely_scores),
+        "score_matrix": matrix,
         "goal_diff_counter": goal_diff_counter,
         "fair_total_line": _fair_total_line_from_distribution(total_counter, 1),
         "fair_handicap_line": _fair_handicap_line_from_distribution(goal_diff_counter, 1),
@@ -887,6 +929,7 @@ def _build_match_feature_snapshot(
     motivation_adjustment: MotivationAdjustment,
     market_handicap: float | None,
     market_probabilities: tuple[float, float, float] | None,
+    market_total_line: float | None,
     expected_home_goals: float,
     expected_away_goals: float,
 ) -> MatchFeatureSnapshot:
@@ -936,7 +979,7 @@ def _build_match_feature_snapshot(
         scenario_pressure_delta=0.0,
         goal_difference_pressure_delta=motivation_adjustment.goal_pressure,
         market_handicap_line=market_handicap,
-        market_total_line=None,
+        market_total_line=market_total_line,
         market_home_probability=home_market_probability,
         market_draw_probability=market_draw_probability,
         market_away_probability=away_market_probability,
@@ -983,7 +1026,9 @@ def generate_match_prediction(session, match_id: int, captured_at: datetime) -> 
     motivation_adjustment = _motivation_adjustment(match_row, match_context)
     adjusted_gap = rating_gap + motivation_adjustment.delta
     market_handicap = _latest_market_handicap(session, match_id)
+    market_total_line = _latest_market_total(session, match_id)
     market_probabilities = _market_implied_probabilities(_latest_market_1x2(session, match_id))
+    calibration_profiles = _load_market_calibration_profiles(session, captured_at=captured_at)
 
     expected_home_goals, expected_away_goals = _expected_goals(
         home=home,
@@ -1004,9 +1049,46 @@ def generate_match_prediction(session, match_id: int, captured_at: datetime) -> 
     under_2_5_probability = float(distribution["under_2_5_probability"])
     fair_total_line = float(distribution["fair_total_line"])
     fair_handicap = float(distribution["fair_handicap_line"])
+    raw_score_matrix = distribution.get("score_matrix")
+    if raw_score_matrix is None:
+        score_matrix = _build_score_probability_matrix(expected_home_goals, expected_away_goals)
+    else:
+        score_matrix = dict(raw_score_matrix)
     recommended_side = "home" if market_handicap is None or fair_handicap < market_handicap else "away"
     totals_tendency = "over 2.5" if over_2_5_probability >= under_2_5_probability else "under 2.5"
     confidence = "high" if abs(rating_gap) >= 6.0 else "medium"
+    one_x_two_calibration = calibrate_one_x_two_market(
+        home_probability=home_win,
+        draw_probability=draw_probability,
+        away_probability=away_win,
+        profiles=calibration_profiles,
+    )
+    handicap_calibration = (
+        calibrate_handicap_market(
+            score_matrix=score_matrix,
+            market_line=market_handicap,
+            profiles=calibration_profiles,
+        )
+        if market_handicap is not None
+        else {
+            "handicap_cover_probability": None,
+            "handicap_push_probability": None,
+            "handicap_fail_probability": None,
+            "summary": {"market_family": "handicap", "source": "unavailable"},
+        }
+    )
+    totals_market_line = fair_total_line if market_total_line is None else market_total_line
+    totals_calibration = calibrate_totals_market(
+        score_matrix=score_matrix,
+        market_line=totals_market_line,
+        line_source="fair_total_line" if market_total_line is None else "market_total_line",
+        profiles=calibration_profiles,
+    )
+    calibration_summary = {
+        "1x2": one_x_two_calibration["summary"],
+        "handicap": handicap_calibration["summary"],
+        "totals": totals_calibration["summary"],
+    }
 
     model_version = "v1-rules"
     run = PredictionRun(match_id=match_id, captured_at=captured_at, model_version=model_version)
@@ -1028,6 +1110,7 @@ def generate_match_prediction(session, match_id: int, captured_at: datetime) -> 
             motivation_adjustment=motivation_adjustment,
             market_handicap=market_handicap,
             market_probabilities=market_probabilities,
+            market_total_line=market_total_line,
             expected_home_goals=expected_home_goals,
             expected_away_goals=expected_away_goals,
         )
@@ -1038,17 +1121,28 @@ def generate_match_prediction(session, match_id: int, captured_at: datetime) -> 
         home_win_probability=round(home_win, 6),
         draw_probability=round(draw_probability, 6),
         away_win_probability=round(away_win, 6),
+        calibrated_home_win_probability=one_x_two_calibration["calibrated_home_win_probability"],
+        calibrated_draw_probability=one_x_two_calibration["calibrated_draw_probability"],
+        calibrated_away_win_probability=one_x_two_calibration["calibrated_away_win_probability"],
         expected_home_goals=expected_home_goals,
         expected_away_goals=expected_away_goals,
         over_2_5_probability=over_2_5_probability,
         under_2_5_probability=under_2_5_probability,
+        handicap_cover_probability=handicap_calibration["handicap_cover_probability"],
+        handicap_push_probability=handicap_calibration["handicap_push_probability"],
+        handicap_fail_probability=handicap_calibration["handicap_fail_probability"],
+        totals_over_probability=totals_calibration["totals_over_probability"],
+        totals_push_probability=totals_calibration["totals_push_probability"],
+        totals_under_probability=totals_calibration["totals_under_probability"],
         fair_handicap_line=fair_handicap,
         fair_total_line=fair_total_line,
         market_handicap_line=market_handicap,
         recommended_handicap_side=recommended_side,
+        recommended_totals_side=totals_calibration["recommended_totals_side"],
         totals_tendency=totals_tendency,
         likely_scorelines=likely_scorelines,
         confidence_level=confidence,
+        calibration_summary_json=calibration_summary,
         summary_conclusion=(
             f"rating gap {rating_gap:.2f}, learning {learning_delta:+.2f}, "
             f"environment {environment_delta:+.2f}, discipline {discipline_delta:+.2f}, "
@@ -1126,6 +1220,22 @@ def generate_match_prediction(session, match_id: int, captured_at: datetime) -> 
             factor_name="lambda_away",
             factor_value=expected_away_goals,
             explanation="context-adjusted expected goals for the away side",
+        )
+    )
+    session.add(
+        PredictionFactor(
+            prediction_run_id=run.id,
+            factor_name="calibration_1x2_home",
+            factor_value=one_x_two_calibration["calibrated_home_win_probability"],
+            explanation="calibration fallback/profile-adjusted home win probability",
+        )
+    )
+    session.add(
+        PredictionFactor(
+            prediction_run_id=run.id,
+            factor_name="calibration_totals_over",
+            factor_value=totals_calibration["totals_over_probability"],
+            explanation="calibration fallback/profile-adjusted totals over probability",
         )
     )
     if market_probabilities is not None:
@@ -1248,6 +1358,35 @@ def diagnose_prediction(session, match_id: int) -> PredictionDiagnostic:
         issue_hints.append("数据薄弱: 当前结构化因子偏少，建议补充更真实的球队情报与盘口快照。")
     if not issue_hints:
         issue_hints.append("当前没有显著异常信号，若结果不符合预期，优先复查规则输出与最新输入数据。")
+    if prediction.calibration_summary_json:
+        one_x_two_summary = prediction.calibration_summary_json.get("1x2", {})
+        handicap_summary = prediction.calibration_summary_json.get("handicap", {})
+        totals_summary = prediction.calibration_summary_json.get("totals", {})
+        issue_hints.extend(
+            [
+                (
+                    "calibration 1x2 source: "
+                    f"{one_x_two_summary.get('source', 'unknown')}, "
+                    f"bucket {one_x_two_summary.get('selected_bucket_key') or one_x_two_summary.get('bucket_key')}, "
+                    f"fallback {one_x_two_summary.get('fallback_level')}, "
+                    f"sample {one_x_two_summary.get('sample_count')}"
+                ),
+                (
+                    "calibration handicap bucket: "
+                    f"{handicap_summary.get('selected_bucket_key') or handicap_summary.get('bucket_key')}, "
+                    f"source {handicap_summary.get('source', 'unknown')}, "
+                    f"line {handicap_summary.get('market_line')}, "
+                    f"fallback {handicap_summary.get('fallback_level')}"
+                ),
+                (
+                    "calibration totals line source: "
+                    f"{totals_summary.get('line_source', 'unknown')}, "
+                    f"bucket {totals_summary.get('selected_bucket_key') or totals_summary.get('bucket_key')}, "
+                    f"source {totals_summary.get('source', 'unknown')}, "
+                    f"line {totals_summary.get('market_line')}"
+                ),
+            ]
+        )
 
     toto = build_toto_recommendation(
         home_team=home.name,
