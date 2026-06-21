@@ -83,8 +83,7 @@ def _load_local_env() -> None:
 
 def _session():
     _load_local_env()
-    settings = Settings.from_env()
-    engine = build_engine(settings.database_url)
+    engine = build_engine(Settings.database_url_from_env())
     create_schema(engine)
     SessionLocal.configure(bind=engine)
     return SessionLocal()
@@ -136,7 +135,10 @@ def analyze_match(match_id: int) -> None:
 def send_due_reports_command(window_minutes: int = 125) -> None:
     now = datetime.now(UTC).replace(tzinfo=None)
     _load_local_env()
-    settings = Settings.from_env()
+    settings = Settings(
+        database_url=Settings.database_url_from_env(),
+        email=Settings.email_from_env(),
+    )
     with _session() as session:
         sent_ids = send_due_reports(
             session,

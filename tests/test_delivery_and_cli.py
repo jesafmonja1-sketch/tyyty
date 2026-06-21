@@ -499,6 +499,111 @@ def test_cli_analyze_match_prints_readable_summary(monkeypatch, tmp_path):
     assert "核心理由" in result.stdout
 
 
+def test_cli_analyze_match_does_not_require_email_env(monkeypatch, tmp_path):
+    db_path = tmp_path / "analyze-match-no-email.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.delenv("WCI_EMAIL_SMTP_HOST", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_SMTP_PORT", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_RECIPIENT", raising=False)
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        home = NationalTeam(
+            fifa_code="GER",
+            name="Germany",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away = NationalTeam(
+            fifa_code="JPN",
+            name="Japan",
+            confederation="AFC",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        db_session.add_all([home, away])
+        db_session.flush()
+        match_row = Match(
+            external_id="wc-analyze-no-email",
+            competition="FIFA World Cup",
+            stage="Group Stage",
+            kickoff_at=_utcnow() + timedelta(hours=2),
+            home_team_id=home.id,
+            away_team_id=away.id,
+            is_neutral_site=True,
+            home_score=None,
+            away_score=None,
+            half_time_score=None,
+            status="scheduled",
+        )
+        db_session.add(match_row)
+        db_session.flush()
+        run = PredictionRun(
+            match_id=match_row.id,
+            captured_at=_utcnow(),
+            model_version="v1-rules",
+        )
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(
+            MatchPrediction(
+                prediction_run_id=run.id,
+                home_win_probability=0.47,
+                draw_probability=0.28,
+                away_win_probability=0.25,
+                calibrated_home_win_probability=0.45,
+                calibrated_draw_probability=0.29,
+                calibrated_away_win_probability=0.26,
+                expected_home_goals=1.35,
+                expected_away_goals=0.97,
+                over_2_5_probability=0.42,
+                under_2_5_probability=0.58,
+                handicap_cover_probability=0.44,
+                handicap_push_probability=0.21,
+                handicap_fail_probability=0.35,
+                totals_over_probability=0.38,
+                totals_push_probability=0.18,
+                totals_under_probability=0.44,
+                fair_handicap_line=-0.25,
+                fair_total_line=2.25,
+                market_handicap_line=-0.5,
+                recommended_handicap_side="away",
+                recommended_totals_side="under",
+                totals_tendency="under 2.5",
+                likely_scorelines="1-0,1-1,2-0",
+                confidence_level="medium",
+                summary_conclusion="Germany slight edge with a cautious goal profile",
+                calibration_summary_json={},
+            )
+        )
+        db_session.add(
+            PredictionFactor(
+                prediction_run_id=run.id,
+                factor_name="market_home_probability",
+                factor_value=0.46,
+                explanation="de-vigged 1X2 market probability for home win",
+            )
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["analyze-match", str(match_row.id)])
+
+    assert result.exit_code == 0
+    assert "Germany vs Japan" in result.stdout
+
+
 def test_cli_analyze_match_uses_fair_total_line_when_market_total_missing(monkeypatch, tmp_path):
     db_path = tmp_path / "analyze-match-fallback.db"
     monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
@@ -835,3 +940,25 @@ def test_python_module_cli_entrypoint_help_lists_analyze_match(monkeypatch, tmp_
 
     assert result.returncode == 0
     assert "analyze-match" in result.stdout
+
+
+def test_dev_shell_script_exists():
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "dev-shell.ps1"
+
+    assert script_path.exists()
+
+
+def test_dev_shell_script_contains_required_environment_variables():
+    repo_root = Path(__file__).resolve().parents[1]
+    script_path = repo_root / "scripts" / "dev-shell.ps1"
+
+    contents = script_path.read_text(encoding="utf-8")
+
+    assert "PYTHONPATH" in contents
+    assert "WCI_DATABASE_URL" in contents
+    assert "WCI_EMAIL_SMTP_HOST" in contents
+    assert "WCI_EMAIL_SMTP_PORT" in contents
+    assert "WCI_EMAIL_USERNAME" in contents
+    assert "WCI_EMAIL_PASSWORD" in contents
+    assert "WCI_EMAIL_RECIPIENT" in contents

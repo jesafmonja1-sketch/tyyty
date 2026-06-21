@@ -18,3 +18,15 @@ def test_settings_from_env_reads_database_and_email_values(monkeypatch, tmp_path
     assert settings.email.username == "sender@qq.com"
     assert settings.email.password == "smtp-auth-code"
     assert settings.email.recipient == "receiver@example.com"
+
+
+def test_database_url_from_env_does_not_require_email_values(monkeypatch, tmp_path):
+    db_path = tmp_path / "world-cup-no-email.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.delenv("WCI_EMAIL_SMTP_HOST", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_SMTP_PORT", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_USERNAME", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_PASSWORD", raising=False)
+    monkeypatch.delenv("WCI_EMAIL_RECIPIENT", raising=False)
+
+    assert Settings.database_url_from_env() == f"sqlite:///{db_path.as_posix()}"
