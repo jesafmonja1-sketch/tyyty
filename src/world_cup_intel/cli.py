@@ -7,6 +7,7 @@ from pathlib import Path
 import typer
 from typer.core import TyperArgument
 
+from world_cup_intel.analysis.market_calibration import rebuild_market_calibration_profiles
 from world_cup_intel.config import Settings
 from world_cup_intel.db import SessionLocal, build_engine, create_schema
 from world_cup_intel.delivery.email_reports import render_match_report
@@ -98,3 +99,19 @@ def seed_upcoming_world_cup_command() -> None:
         seeded = seed_upcoming_world_cup_matches(session, captured_at)
         session.commit()
         typer.echo(f"Seeded {len(seeded)} upcoming World Cup match(es).")
+
+
+@app.command("rebuild-market-calibration")
+def rebuild_market_calibration_command() -> None:
+    captured_at = datetime.now(UTC).replace(tzinfo=None)
+    with _session() as session:
+        built = rebuild_market_calibration_profiles(session, captured_at=captured_at)
+        session.commit()
+        typer.echo(
+            "Rebuilt market calibration profiles: "
+            f"1x2={built['1x2']} handicap={built['handicap']} totals={built['totals']}"
+        )
+
+
+if __name__ == "__main__":
+    app()

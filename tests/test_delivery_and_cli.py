@@ -1,12 +1,27 @@
 from datetime import UTC, datetime, timedelta
+import os
+from pathlib import Path
+import subprocess
+import sys
 
 from typer.testing import CliRunner
 
+from world_cup_intel.analysis.market_calibration import rebuild_market_calibration_profiles
 from world_cup_intel.cli import app
 from world_cup_intel.config import EmailSettings, Settings
 from world_cup_intel.delivery.email_reports import render_match_report, send_match_report
 from world_cup_intel.delivery.scheduler import select_matches_needing_report, send_due_reports
-from world_cup_intel.schema import Match, MatchPrediction, MatchReview, NationalTeam, PredictionFactor, PredictionRun, SentReport
+from world_cup_intel.schema import (
+    Match,
+    MatchFeatureSnapshot,
+    MatchPrediction,
+    MatchReview,
+    MarketCalibrationProfile,
+    NationalTeam,
+    PredictionFactor,
+    PredictionRun,
+    SentReport,
+)
 
 
 def _utcnow() -> datetime:
@@ -349,3 +364,208 @@ def test_cli_send_due_reports_uses_configured_database(monkeypatch, tmp_path):
     assert result.exit_code == 0
     assert "Sent 1 report(s)." in result.stdout
     assert len(FakeSMTP.sent_messages) == 1
+
+
+def test_rebuild_market_calibration_command_runs_successfully(monkeypatch, tmp_path):
+    db_path = tmp_path / "rebuild-market-calibration.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_HOST", "smtp.qq.com")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_PORT", "465")
+    monkeypatch.setenv("WCI_EMAIL_USERNAME", "sender@qq.com")
+    monkeypatch.setenv("WCI_EMAIL_PASSWORD", "smtp-auth-code")
+    monkeypatch.setenv("WCI_EMAIL_RECIPIENT", "receiver@example.com")
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        match_row = _seed_prediction(
+            db_session,
+            _utcnow() - timedelta(hours=2),
+            external_id="wc-rebuild-cli",
+            home_code="GER",
+            home_name="Germany",
+            away_code="CRC",
+            away_name="Costa Rica",
+        )
+        match_row.status = "finished"
+        match_row.home_score = 3
+        match_row.away_score = 1
+        match_row.half_time_score = "2-0"
+        run = db_session.query(PredictionRun).filter_by(match_id=match_row.id).one()
+        db_session.add(
+            MatchFeatureSnapshot(
+                prediction_run_id=run.id,
+                match_id=match_row.id,
+                captured_at=run.captured_at,
+                model_version="v1-rules",
+                home_overall_score=88.0,
+                away_overall_score=72.0,
+                home_attack_score=86.0,
+                away_attack_score=69.0,
+                home_defense_score=81.0,
+                away_defense_score=66.0,
+                home_recent_form_score=84.0,
+                away_recent_form_score=63.0,
+                power_delta=16.0,
+                attack_delta=17.0,
+                defense_delta=15.0,
+                form_delta=21.0,
+                home_learning_readiness_score=0.0,
+                away_learning_readiness_score=0.0,
+                home_learning_momentum_score=0.0,
+                away_learning_momentum_score=0.0,
+                home_tactical_continuity_score=0.0,
+                away_tactical_continuity_score=0.0,
+                learning_delta=0.0,
+                tactical_continuity_delta=0.0,
+                home_availability_alert_count=0,
+                away_availability_alert_count=0,
+                home_minutes_risk_score=0.0,
+                away_minutes_risk_score=0.0,
+                discipline_delta=0.0,
+                environment_delta=0.0,
+                weather_delta=0.0,
+                referee_delta=0.0,
+                motivation_delta=0.0,
+                fatigue_delta=0.0,
+                scenario_pressure_delta=0.0,
+                goal_difference_pressure_delta=0.0,
+                market_handicap_line=-0.5,
+                market_total_line=2.5,
+                market_home_probability=0.6,
+                market_draw_probability=0.25,
+                market_away_probability=0.15,
+                market_over_price=1.92,
+                market_under_price=1.94,
+                lambda_home=1.8,
+                lambda_away=0.9,
+                projected_tempo_score=0.0,
+                learning_adjustment=0.0,
+                feature_payload_json={},
+            )
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["rebuild-market-calibration"])
+
+    assert result.exit_code == 0
+    assert "rebuilt market calibration profiles" in result.stdout.lower()
+    with local_session() as db_session:
+        profiles = db_session.query(MarketCalibrationProfile).all()
+    assert profiles
+    assert {profile.market_family for profile in profiles} >= {"1x2", "handicap", "totals"}
+
+
+def test_rebuild_market_calibration_command_persists_profiles(session):
+    match_row = _seed_prediction(
+        session,
+        _utcnow() - timedelta(hours=2),
+        external_id="wc-rebuild-session",
+        home_code="ESP",
+        home_name="Spain",
+        away_code="JPN",
+        away_name="Japan",
+    )
+    match_row.status = "finished"
+    match_row.home_score = 2
+    match_row.away_score = 1
+    match_row.half_time_score = "1-0"
+    run = session.query(PredictionRun).filter_by(match_id=match_row.id).one()
+    session.add(
+        MatchFeatureSnapshot(
+            prediction_run_id=run.id,
+            match_id=match_row.id,
+            captured_at=run.captured_at,
+            model_version="v1-rules",
+            home_overall_score=83.0,
+            away_overall_score=78.0,
+            home_attack_score=81.0,
+            away_attack_score=76.0,
+            home_defense_score=80.0,
+            away_defense_score=75.0,
+            home_recent_form_score=82.0,
+            away_recent_form_score=77.0,
+            power_delta=5.0,
+            attack_delta=5.0,
+            defense_delta=5.0,
+            form_delta=5.0,
+            home_learning_readiness_score=0.0,
+            away_learning_readiness_score=0.0,
+            home_learning_momentum_score=0.0,
+            away_learning_momentum_score=0.0,
+            home_tactical_continuity_score=0.0,
+            away_tactical_continuity_score=0.0,
+            learning_delta=0.0,
+            tactical_continuity_delta=0.0,
+            home_availability_alert_count=0,
+            away_availability_alert_count=0,
+            home_minutes_risk_score=0.0,
+            away_minutes_risk_score=0.0,
+            discipline_delta=0.0,
+            environment_delta=0.0,
+            weather_delta=0.0,
+            referee_delta=0.0,
+            motivation_delta=0.0,
+            fatigue_delta=0.0,
+            scenario_pressure_delta=0.0,
+            goal_difference_pressure_delta=0.0,
+            market_handicap_line=-0.5,
+            market_total_line=2.5,
+            market_home_probability=0.52,
+            market_draw_probability=0.27,
+            market_away_probability=0.21,
+            market_over_price=1.9,
+            market_under_price=1.96,
+            lambda_home=1.5,
+            lambda_away=1.0,
+            projected_tempo_score=0.0,
+            learning_adjustment=0.0,
+            feature_payload_json={},
+        )
+    )
+    session.commit()
+
+    built = rebuild_market_calibration_profiles(
+        session,
+        captured_at=_utcnow(),
+    )
+    session.commit()
+
+    profiles = session.query(MarketCalibrationProfile).all()
+
+    assert built["1x2"] >= 1
+    assert built["handicap"] >= 1
+    assert built["totals"] >= 1
+    assert profiles
+    assert {profile.market_family for profile in profiles} >= {"1x2", "handicap", "totals"}
+
+
+def test_python_module_cli_entrypoint_runs_rebuild_command(monkeypatch, tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "module-entrypoint.db"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path) + os.pathsep + str(repo_root / "src")
+    env["WCI_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+    env["WCI_EMAIL_SMTP_HOST"] = "smtp.qq.com"
+    env["WCI_EMAIL_SMTP_PORT"] = "465"
+    env["WCI_EMAIL_USERNAME"] = "sender@qq.com"
+    env["WCI_EMAIL_PASSWORD"] = "smtp-auth-code"
+    env["WCI_EMAIL_RECIPIENT"] = "receiver@example.com"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "world_cup_intel.cli", "rebuild-market-calibration"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "rebuilt market calibration profiles" in result.stdout.lower()

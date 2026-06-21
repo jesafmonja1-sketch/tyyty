@@ -3,6 +3,19 @@ from __future__ import annotations
 from datetime import datetime
 import math
 
+from sqlalchemy import delete
+from sqlalchemy import desc
+from sqlalchemy import select
+
+from world_cup_intel.schema import Match
+from world_cup_intel.schema import MatchFeatureSnapshot
+from world_cup_intel.schema import MatchPrediction
+from world_cup_intel.schema import MarketCalibrationProfile
+from world_cup_intel.schema import PredictionRun
+
+
+PROFILE_VERSION = "v1"
+
 
 def build_probability_band_key(probability: float) -> str:
     if probability < 0.15:
@@ -520,3 +533,198 @@ def compute_reliability_gap(*, rows: list[dict[str, float]], bucket_size: float 
         average_outcome = sum(row["actual_outcome"] for row in bucket_rows) / len(bucket_rows)
         gap += abs(average_probability - average_outcome) * (len(bucket_rows) / len(rows))
     return round(gap, 6)
+
+
+def _validate_unique_predictions(rows: list[tuple[Match, PredictionRun, MatchPrediction]]) -> None:
+    counts: dict[int, int] = {}
+    for _, run, _ in rows:
+        counts[run.id] = counts.get(run.id, 0) + 1
+    duplicate_run_ids = [run_id for run_id, count in counts.items() if count > 1]
+    if duplicate_run_ids:
+        first_run_id = sorted(duplicate_run_ids)[0]
+        raise ValueError(f"Expected one MatchPrediction for prediction_run_id={first_run_id}")
+
+
+def _latest_finished_prediction_rows(session, *, captured_at: datetime) -> list[dict]:
+    prediction_rows = session.execute(
+        select(Match, PredictionRun, MatchPrediction)
+        .join(PredictionRun, PredictionRun.match_id == Match.id)
+        .join(MatchPrediction, MatchPrediction.prediction_run_id == PredictionRun.id)
+        .where(
+            Match.status == "finished",
+            Match.home_score.is_not(None),
+            Match.away_score.is_not(None),
+            PredictionRun.captured_at <= captured_at,
+            Match.kickoff_at <= captured_at,
+        )
+        .order_by(Match.id, desc(PredictionRun.captured_at), desc(PredictionRun.id))
+    ).all()
+    _validate_unique_predictions(prediction_rows)
+
+    feature_snapshots = session.execute(
+        select(MatchFeatureSnapshot)
+        .where(MatchFeatureSnapshot.captured_at <= captured_at)
+        .order_by(
+            MatchFeatureSnapshot.prediction_run_id,
+            desc(MatchFeatureSnapshot.captured_at),
+            desc(MatchFeatureSnapshot.id),
+        )
+    ).scalars().all()
+    latest_feature_snapshot_by_run: dict[int, MatchFeatureSnapshot] = {}
+    for snapshot in feature_snapshots:
+        if snapshot.prediction_run_id in latest_feature_snapshot_by_run:
+            continue
+        latest_feature_snapshot_by_run[snapshot.prediction_run_id] = snapshot
+
+    latest_by_match: dict[int, dict] = {}
+    for match_row, run, prediction in prediction_rows:
+        if match_row.id in latest_by_match:
+            continue
+        latest_by_match[match_row.id] = {
+            "match": match_row,
+            "run": run,
+            "feature_snapshot": latest_feature_snapshot_by_run.get(run.id),
+            "prediction": prediction,
+        }
+    return list(latest_by_match.values())
+
+
+def _build_one_x_two_profile_rows(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        match_row = row["match"]
+        prediction = row["prediction"]
+        probabilities = {
+            "home": float(prediction.home_win_probability),
+            "draw": float(prediction.draw_probability),
+            "away": float(prediction.away_win_probability),
+        }
+        strongest_outcome = max(probabilities, key=probabilities.get)
+        actual_outcome = "draw"
+        if match_row.home_score > match_row.away_score:
+            actual_outcome = "home"
+        elif match_row.home_score < match_row.away_score:
+            actual_outcome = "away"
+        bucket_key = build_probability_band_key(probabilities[strongest_outcome])
+        grouped.setdefault(bucket_key, []).append(
+            {"outcome_hit": 1.0 if strongest_outcome == actual_outcome else 0.0}
+        )
+    return grouped
+
+
+def _build_handicap_profile_rows(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        match_row = row["match"]
+        feature_snapshot = row["feature_snapshot"]
+        if feature_snapshot is None:
+            continue
+        market_line = feature_snapshot.market_handicap_line
+        if market_line is None:
+            continue
+        bucket_key = build_handicap_bucket_key(float(market_line))
+        grouped.setdefault(bucket_key, []).append(
+            settle_handicap_line(
+                home_goals=int(match_row.home_score),
+                away_goals=int(match_row.away_score),
+                line=float(market_line),
+            )
+        )
+    return grouped
+
+
+def _build_totals_profile_rows(rows: list[dict]) -> dict[str, list[dict]]:
+    grouped: dict[str, list[dict]] = {}
+    for row in rows:
+        match_row = row["match"]
+        feature_snapshot = row["feature_snapshot"]
+        prediction = row["prediction"]
+        market_line = None if feature_snapshot is None else feature_snapshot.market_total_line
+        if market_line is None:
+            market_line = prediction.fair_total_line
+        bucket_key = build_totals_bucket_key(float(market_line))
+        grouped.setdefault(bucket_key, []).append(
+            settle_total_line(
+                total_goals=int(match_row.home_score) + int(match_row.away_score),
+                line=float(market_line),
+            )
+        )
+    return grouped
+
+
+def _persist_profiles(
+    session,
+    *,
+    market_family: str,
+    grouped_rows: dict[str, list[dict]],
+    captured_at: datetime,
+) -> int:
+    built_count = 0
+    for bucket_key, rows in grouped_rows.items():
+        if market_family == "1x2":
+            payload = build_one_x_two_profile(
+                rows=rows,
+                bucket_key=bucket_key,
+                profile_version=PROFILE_VERSION,
+                captured_at=captured_at.isoformat(),
+            )
+            fallback_keys = _one_x_two_fallback_bucket_keys(bucket_key)
+        elif market_family == "handicap":
+            payload = build_handicap_profile(
+                rows=rows,
+                bucket_key=bucket_key,
+                profile_version=PROFILE_VERSION,
+                captured_at=captured_at.isoformat(),
+            )
+            fallback_keys = _handicap_fallback_bucket_keys(bucket_key)
+        else:
+            payload = build_totals_profile(
+                rows=rows,
+                bucket_key=bucket_key,
+                profile_version=PROFILE_VERSION,
+                captured_at=captured_at.isoformat(),
+            )
+            fallback_keys = _totals_fallback_bucket_keys(bucket_key)
+
+        session.add(
+            MarketCalibrationProfile(
+                market_family=market_family,
+                bucket_key=bucket_key,
+                profile_version=PROFILE_VERSION,
+                sample_count=int(payload["sample_count"]),
+                fallback_bucket_key=fallback_keys[0] if fallback_keys else None,
+                profile_json=payload,
+                updated_at=captured_at,
+            )
+        )
+        built_count += 1
+    return built_count
+
+
+def rebuild_market_calibration_profiles(session, captured_at: datetime) -> dict[str, int]:
+    rows = _latest_finished_prediction_rows(session, captured_at=captured_at)
+    session.execute(
+        delete(MarketCalibrationProfile).where(MarketCalibrationProfile.profile_version == PROFILE_VERSION)
+    )
+
+    built = {
+        "1x2": _persist_profiles(
+            session,
+            market_family="1x2",
+            grouped_rows=_build_one_x_two_profile_rows(rows),
+            captured_at=captured_at,
+        ),
+        "handicap": _persist_profiles(
+            session,
+            market_family="handicap",
+            grouped_rows=_build_handicap_profile_rows(rows),
+            captured_at=captured_at,
+        ),
+        "totals": _persist_profiles(
+            session,
+            market_family="totals",
+            grouped_rows=_build_totals_profile_rows(rows),
+            captured_at=captured_at,
+        ),
+    }
+    return built
