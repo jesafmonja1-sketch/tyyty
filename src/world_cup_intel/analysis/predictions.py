@@ -52,6 +52,13 @@ class PredictionDiagnostic:
     factor_lines: list[str]
     issue_hints: list[str]
     toto_recommendation_lines: list[str]
+    match_suitability_label: str
+    match_suitability_reason: str
+    handicap_suitability_label: str
+    handicap_suitability_reason: str
+    totals_suitability_label: str
+    totals_suitability_reason: str
+    recommended_totals_side: str | None
 
 
 @dataclass
@@ -1305,7 +1312,7 @@ def diagnose_prediction(session, match_id: int) -> PredictionDiagnostic:
         select(MatchPrediction, PredictionRun)
         .join(PredictionRun, PredictionRun.id == MatchPrediction.prediction_run_id)
         .where(PredictionRun.match_id == match_id)
-        .order_by(desc(PredictionRun.captured_at))
+        .order_by(desc(PredictionRun.captured_at), desc(PredictionRun.id), desc(MatchPrediction.id))
     ).first()
     if row is None:
         raise ValueError(f"Prediction not found for match_id={match_id}")
@@ -1437,4 +1444,11 @@ def diagnose_prediction(session, match_id: int) -> PredictionDiagnostic:
             f"风险等级: {toto.risk_level}",
             f"建议理由: {toto.reason}",
         ],
+        match_suitability_label=toto.suitability_label,
+        match_suitability_reason=toto.suitability_reason,
+        handicap_suitability_label=toto.handicap_suitability_label,
+        handicap_suitability_reason=toto.handicap_suitability_reason,
+        totals_suitability_label=toto.totals_suitability_label,
+        totals_suitability_reason=toto.totals_suitability_reason,
+        recommended_totals_side=prediction.recommended_totals_side,
     )

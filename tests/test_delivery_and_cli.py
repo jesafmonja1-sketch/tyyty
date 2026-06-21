@@ -366,6 +366,247 @@ def test_cli_send_due_reports_uses_configured_database(monkeypatch, tmp_path):
     assert len(FakeSMTP.sent_messages) == 1
 
 
+def test_cli_analyze_match_prints_readable_summary(monkeypatch, tmp_path):
+    db_path = tmp_path / "analyze-match.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_HOST", "smtp.qq.com")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_PORT", "465")
+    monkeypatch.setenv("WCI_EMAIL_USERNAME", "sender@qq.com")
+    monkeypatch.setenv("WCI_EMAIL_PASSWORD", "smtp-auth-code")
+    monkeypatch.setenv("WCI_EMAIL_RECIPIENT", "receiver@example.com")
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        home = NationalTeam(
+            fifa_code="BRA",
+            name="Brazil",
+            confederation="CONMEBOL",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away = NationalTeam(
+            fifa_code="POR",
+            name="Portugal",
+            confederation="UEFA",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        db_session.add_all([home, away])
+        db_session.flush()
+        match_row = Match(
+            external_id="wc-analyze-1",
+            competition="FIFA World Cup",
+            stage="Quarterfinal",
+            kickoff_at=_utcnow() + timedelta(hours=2),
+            home_team_id=home.id,
+            away_team_id=away.id,
+            is_neutral_site=True,
+            home_score=None,
+            away_score=None,
+            half_time_score=None,
+            status="scheduled",
+        )
+        db_session.add(match_row)
+        db_session.flush()
+        run = PredictionRun(
+            match_id=match_row.id,
+            captured_at=_utcnow(),
+            model_version="v1-rules",
+        )
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(
+            MatchPrediction(
+                prediction_run_id=run.id,
+                home_win_probability=0.48,
+                draw_probability=0.27,
+                away_win_probability=0.25,
+                calibrated_home_win_probability=0.46,
+                calibrated_draw_probability=0.28,
+                calibrated_away_win_probability=0.26,
+                expected_home_goals=1.42,
+                expected_away_goals=1.03,
+                over_2_5_probability=0.44,
+                under_2_5_probability=0.56,
+                handicap_cover_probability=0.41,
+                handicap_push_probability=0.22,
+                handicap_fail_probability=0.37,
+                totals_over_probability=0.39,
+                totals_push_probability=0.17,
+                totals_under_probability=0.44,
+                fair_handicap_line=-0.25,
+                fair_total_line=2.25,
+                market_handicap_line=-0.5,
+                recommended_handicap_side="away",
+                recommended_totals_side="under",
+                totals_tendency="under 2.5",
+                likely_scorelines="1-0,1-1,2-1",
+                confidence_level="medium",
+                summary_conclusion="home side slight edge but market line is deeper",
+                calibration_summary_json={},
+            )
+        )
+        db_session.add_all(
+            [
+                PredictionFactor(
+                    prediction_run_id=run.id,
+                    factor_name="market_home_probability",
+                    factor_value=0.44,
+                    explanation="de-vigged 1X2 market probability for home win",
+                ),
+                PredictionFactor(
+                    prediction_run_id=run.id,
+                    factor_name="market_draw_probability",
+                    factor_value=0.29,
+                    explanation="de-vigged 1X2 market probability for draw",
+                ),
+                PredictionFactor(
+                    prediction_run_id=run.id,
+                    factor_name="market_away_probability",
+                    factor_value=0.27,
+                    explanation="de-vigged 1X2 market probability for away win",
+                ),
+            ]
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["analyze-match", str(match_row.id)])
+
+    assert result.exit_code == 0
+    assert "比赛结论" in result.stdout
+    assert "Brazil vs Portugal" in result.stdout
+    assert "home side slight edge but market line is deeper" in result.stdout
+    assert "胜平负" in result.stdout
+    assert "市场概率: 市场概率:" not in result.stdout
+    assert "市场分歧: 价值差:" not in result.stdout
+    assert "让球" in result.stdout
+    assert "推荐方向: away" in result.stdout
+    assert "大小球" in result.stdout
+    assert "推荐方向: under" in result.stdout
+    assert "比分" in result.stdout
+    assert "1-0, 1-1, 2-1" in result.stdout
+    assert "防冷比分: N/A" in result.stdout
+    assert "风险点" in result.stdout
+    assert "核心理由" in result.stdout
+
+
+def test_cli_analyze_match_uses_fair_total_line_when_market_total_missing(monkeypatch, tmp_path):
+    db_path = tmp_path / "analyze-match-fallback.db"
+    monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_HOST", "smtp.qq.com")
+    monkeypatch.setenv("WCI_EMAIL_SMTP_PORT", "465")
+    monkeypatch.setenv("WCI_EMAIL_USERNAME", "sender@qq.com")
+    monkeypatch.setenv("WCI_EMAIL_PASSWORD", "smtp-auth-code")
+    monkeypatch.setenv("WCI_EMAIL_RECIPIENT", "receiver@example.com")
+
+    from sqlalchemy.orm import sessionmaker
+
+    from world_cup_intel.db import build_engine, create_schema
+
+    engine = build_engine(f"sqlite:///{db_path.as_posix()}")
+    create_schema(engine)
+    local_session = sessionmaker(bind=engine, expire_on_commit=False, future=True)
+    with local_session() as db_session:
+        home = NationalTeam(
+            fifa_code="ARG",
+            name="Argentina",
+            confederation="CONMEBOL",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        away = NationalTeam(
+            fifa_code="MEX",
+            name="Mexico",
+            confederation="CONCACAF",
+            tactical_labels=[],
+            common_formations=[],
+            is_supported=True,
+        )
+        db_session.add_all([home, away])
+        db_session.flush()
+        match_row = Match(
+            external_id="wc-analyze-2",
+            competition="FIFA World Cup",
+            stage="Group Stage",
+            kickoff_at=_utcnow() + timedelta(hours=2),
+            home_team_id=home.id,
+            away_team_id=away.id,
+            is_neutral_site=True,
+            home_score=None,
+            away_score=None,
+            half_time_score=None,
+            status="scheduled",
+        )
+        db_session.add(match_row)
+        db_session.flush()
+        run = PredictionRun(
+            match_id=match_row.id,
+            captured_at=_utcnow(),
+            model_version="v1-rules",
+        )
+        db_session.add(run)
+        db_session.flush()
+        db_session.add(
+            MatchPrediction(
+                prediction_run_id=run.id,
+                home_win_probability=0.51,
+                draw_probability=0.26,
+                away_win_probability=0.23,
+                calibrated_home_win_probability=0.49,
+                calibrated_draw_probability=0.27,
+                calibrated_away_win_probability=0.24,
+                expected_home_goals=1.61,
+                expected_away_goals=0.92,
+                over_2_5_probability=0.47,
+                under_2_5_probability=0.53,
+                handicap_cover_probability=0.49,
+                handicap_push_probability=0.21,
+                handicap_fail_probability=0.30,
+                totals_over_probability=0.46,
+                totals_push_probability=0.18,
+                totals_under_probability=0.36,
+                fair_handicap_line=-0.5,
+                fair_total_line=2.25,
+                market_handicap_line=-0.5,
+                recommended_handicap_side="home",
+                recommended_totals_side="under",
+                totals_tendency="under 2.5",
+                likely_scorelines="1-0,2-0,1-1",
+                confidence_level="medium",
+                summary_conclusion="Argentina edge with a cautious totals profile",
+                calibration_summary_json={
+                    "totals": {
+                        "market_family": "totals",
+                        "market_line": 2.25,
+                        "line_source": "fair_total_line",
+                        "source": "fallback",
+                    }
+                },
+            )
+        )
+        db_session.commit()
+
+    runner = CliRunner()
+    result = runner.invoke(app, ["analyze-match", str(match_row.id)])
+
+    assert result.exit_code == 0
+    assert "Argentina vs Mexico" in result.stdout
+    assert "Argentina edge with a cautious totals profile" in result.stdout
+    assert "当前线: 2.25 (fair_total_line)" in result.stdout
+    assert "fair total line: 2.25" in result.stdout
+    assert "防冷比分: N/A" in result.stdout
+
+
 def test_rebuild_market_calibration_command_runs_successfully(monkeypatch, tmp_path):
     db_path = tmp_path / "rebuild-market-calibration.db"
     monkeypatch.setenv("WCI_DATABASE_URL", f"sqlite:///{db_path.as_posix()}")
@@ -569,3 +810,28 @@ def test_python_module_cli_entrypoint_runs_rebuild_command(monkeypatch, tmp_path
 
     assert result.returncode == 0
     assert "rebuilt market calibration profiles" in result.stdout.lower()
+
+
+def test_python_module_cli_entrypoint_help_lists_analyze_match(monkeypatch, tmp_path):
+    repo_root = Path(__file__).resolve().parents[1]
+    db_path = tmp_path / "module-entrypoint-help.db"
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(tmp_path) + os.pathsep + str(repo_root / "src")
+    env["WCI_DATABASE_URL"] = f"sqlite:///{db_path.as_posix()}"
+    env["WCI_EMAIL_SMTP_HOST"] = "smtp.qq.com"
+    env["WCI_EMAIL_SMTP_PORT"] = "465"
+    env["WCI_EMAIL_USERNAME"] = "sender@qq.com"
+    env["WCI_EMAIL_PASSWORD"] = "smtp-auth-code"
+    env["WCI_EMAIL_RECIPIENT"] = "receiver@example.com"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "world_cup_intel.cli", "--help"],
+        cwd=repo_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0
+    assert "analyze-match" in result.stdout
